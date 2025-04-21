@@ -1,0 +1,11 @@
+numpy
+natsort
+matplotlib
+PyQt5
+pyqtgraph
+PyOpenGL
+python-lzf
+scipy
+pillow
+setuptools
+pyinstaller

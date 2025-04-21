@@ -1,2 +1,3 @@
 # PCDView
-点云可视化工具
+
+python qtvis.py

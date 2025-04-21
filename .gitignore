@@ -1,0 +1,12 @@
+**__pycache__**
+**build**
+**egg-info**
+/.idea
+/build
+data/
+/dist
+*.pyc
+*.idea/
+*.so
+*vscode
+dist/
