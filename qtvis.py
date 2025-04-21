@@ -69,8 +69,11 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.points_color.triggered.connect(self.select_color)  # Connect to color selection
         tool_pointsize_menu.addAction(self.points_color)
 
-        self.set_pointsize = QAction(QIcon(os.path.join(self.curpath, 'icons/pointsize.png')), "Point Size", self)
-        self.set_pointsize.triggered.connect(self.open_file)
+        # Add "Coordinate axis" action
+        coordinate_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/coordinate.png')).pixmap(25, 25))
+        self.coordinate = QAction(coordinate_icon, "Coordinate", self)
+        self.coordinate.triggered.connect(self.create_coordinate)  # Connect to color selection
+        tool_pointsize_menu.addAction(self.coordinate)
 
         # Create a toolbar for quick access to file actions and add it using addToolBar
         self.toolbar = QToolBar(self)
@@ -83,7 +86,10 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.toolbar.addAction(self.decrease_pointsize_action)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.points_color)  # Add color button to toolbar
+        self.toolbar.addAction(self.coordinate)
         self.toolbar.setStyleSheet("QToolBar { background-color: white; }")
+
+
 
         self.color_sidebar = QToolBar("colors", self)
         self.addToolBar(Qt.RightToolBarArea, self.color_sidebar)
@@ -290,6 +296,18 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
             self.colors = color.getRgbF()
             self.color_fields = None
             self.vis_fram()
+
+    def create_coordinate(self):
+        if self.axis_visible:
+            if self.axis:
+                self.glwidget.removeItem(self.axis)
+                self.axis = None
+            self.axis_visible = False
+        else:
+            self.axis = gl.GLAxisItem()
+            self.axis.setSize(x=3, y=3, z=3)
+            self.glwidget.addItem(self.axis)
+            self.axis_visible = True
 
     def update_color_sidebar(self):
         self.color_sidebar.clear()

@@ -29,6 +29,8 @@ class PCDViewWidget(QWidget):
         self.glwidget = gl.GLViewWidget()
         self.glwidget.setWindowTitle('PointCloudViewer')
 
+        self.axis_visible = False
+
         """调整视角"""
         self.glwidget.opts['distance'] = 15
         self.glwidget.setCameraPosition(distance=self.glwidget.opts['distance'], elevation=0, azimuth=0)
@@ -39,7 +41,7 @@ class PCDViewWidget(QWidget):
         self.raw_points = text_points
 
 
-        colors =  [(0, 'lightblue'), (0.2, 'blue'), (0.8, 'green'), (0.85, 'yellow'), (0.9, 'orange'), (0.95, 'red'),(1, 'darkred')]
+        colors =  [(0, 'lightblue'), (0.2, 'blue'), (0.4, 'green'), (0.7, 'yellow'), (0.9, 'orange'), (0.95, 'red'),(1, 'darkred')]
         cm = LinearSegmentedColormap.from_list('blue_green_yellow_orange_red_darkred', colors, N=256)
         self.Colors = [cm, plt.get_cmap('cool'), plt.get_cmap('GnBu'), plt.get_cmap('Greys'), plt.get_cmap('hot')]  # 参考:https://zhuanlan.zhihu.com/p/114420786
 
