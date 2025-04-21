@@ -1,5 +1,7 @@
 import sys
 import os
+import wata
+from pathlib import Path
 from natsort import natsorted
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QFileDialog,
@@ -7,6 +9,7 @@ from PyQt5.QtWidgets import (
     QAction, QToolBar, QWidget, QPushButton,
     QVBoxLayout, QHBoxLayout, QColorDialog,
 )
+from PyQt5 import QtCore, QtWidgets, QtGui
 import matplotlib.pyplot as plt
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QFont, QColor, QIcon
@@ -25,6 +28,8 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.curpath = os.path.dirname(os.path.abspath(__file__))
         self.setWindowTitle("Point Cloud Viewer")
         self.setGeometry(100, 100, 800, 600)
+
+        self.current_bbox_items = []
 
         # Create a central widget
         central_widget = QWidget()
@@ -49,6 +54,11 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.open_dir_action = QAction(open_dir_icon, "Open Directory", self)
         self.open_dir_action.triggered.connect(self.open_directory)
         file_menu.addAction(self.open_dir_action)
+
+        open_bboxes_dir_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/open_dir.png')).pixmap(25, 25))
+        self.open_bboxes_dir_action = QAction(open_bboxes_dir_icon, "Open Directory", self)
+        self.open_bboxes_dir_action.triggered.connect(self.open_bboxes_directory)
+        file_menu.addAction(self.open_bboxes_dir_action)
 
         self.set_pointsize = QAction(QIcon(os.path.join(self.curpath, 'icons/pointsize.png')), "Point Size", self)
         self.set_pointsize.triggered.connect(self.open_file)
@@ -80,6 +90,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
         self.toolbar.addAction(self.open_file_action)
         self.toolbar.addAction(self.open_dir_action)
+        self.toolbar.addAction(self.open_bboxes_dir_action)
         self.toolbar.addSeparator()
 
         self.toolbar.addAction(self.increase_pointsize_action)
@@ -87,6 +98,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.points_color)  # Add color button to toolbar
         self.toolbar.addAction(self.coordinate)
+
         self.toolbar.setStyleSheet("QToolBar { background-color: white; }")
 
 
@@ -166,6 +178,18 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
             ])
             self.current_frame_index = 0
             self.frame_slider.setMaximum(len(self.point_cloud_files) - 1)
+            self.bboxes_files = None
+            self.load_frame()
+
+    def open_bboxes_directory(self):
+        self.timer.stop()  # Stop the timer to avoid auto-frame transition
+        self.playing = False
+        self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
+
+        self.bboxes_directory = QFileDialog.getExistingDirectory(self, "Select bboxes json Directory")
+
+        if self.bboxes_directory:
+            self.bboxes_files = natsorted([f for f in os.listdir(self.directory) if f.endswith('.json')])
             self.load_frame()
 
     def open_file(self):
@@ -200,8 +224,8 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         start_time = time.time()
 
         assert self.current_frame_index >= 0 and self.current_frame_index < len(self.point_cloud_files)
-        pcd_path = os.path.join(self.directory, self.point_cloud_files[self.current_frame_index])
-        self.raw_points, self.structured_points, metadata = get_points_from_pcd_file(pcd_path)
+        self.pcd_file = os.path.join(self.directory, self.point_cloud_files[self.current_frame_index])
+        self.raw_points, self.structured_points, metadata = get_points_from_pcd_file(self.pcd_file)
         if self.color_fields is not None:
             print(self.color_fields)
             self.colors = self.Colors[0](self.min_max_normalization(self.structured_points[self.color_fields]))
@@ -226,30 +250,58 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         return normalized_matrix
 
     def vis_fram(self, updata_color_bar=False):
+
+        for item in self.current_bbox_items:
+            self.glwidget.removeItem(item)
+        self.current_bbox_items = []
+
+        if self.bboxes_directory is not None:
+            pcd_stem = Path(self.pcd_file).stem
+            print(self.bboxes_directory)
+            self.json_path = os.path.join(str(self.bboxes_directory), str(pcd_stem)+".json")
+            if os.path.isfile(self.json_path):
+                json_data = wata.PointCloudProcess.get_anno_from_tanway_json(wata.FileProcess.load_file(self.json_path))
+
+                for i, box in enumerate(json_data["bboxes"]):
+                    x, y, z, l, w, h, yaw = box
+                    deg_yaw = np.rad2deg(yaw)
+                    class_name = json_data["className"][i].split("TYPE_")[1]
+                    if class_name in self.class_map.keys():
+                        bbox_color = self.class_map[class_name]
+                    else:
+                        bbox_color = self.class_map["others"]
+
+                    bbox = gl.GLBoxItem(size=QtGui.QVector3D(l, w, h), color=QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]), glOptions='opaque')
+                    bbox.translate(-l/2, -w/2, -h/2)
+                    bbox.rotate(deg_yaw, 0, 0, 1)
+                    bbox.translate(x,y,z)
+
+                    class_name_text = gl.GLTextItem(text=class_name, pos=(x, y, z+1), color=QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]), font=QtGui.QFont('Helvetica', 12))
+                    arrow = self.draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(yaw),np.sin(yaw),0],length= l/2 ,color = QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]))
+
+                    self.glwidget.addItem(bbox)
+                    self.glwidget.addItem(arrow)
+                    self.glwidget.addItem(class_name_text)
+
+                    self.current_bbox_items.append(bbox)
+                    self.current_bbox_items.append(arrow)
+                    self.current_bbox_items.append(class_name_text)
+
         if self.scatter:
             self.glwidget.removeItem(self.scatter)
 
         self.points = self.raw_points[:, :3]
-        # Apply the selected color
-
         if self.color_fields is not None:
             if max(self.structured_points[self.color_fields]) != 0:
                 unique_values = np.unique(self.structured_points[self.color_fields])
                 num_unique_values = len(unique_values)
-
                 if num_unique_values <= 16:
                     color_map = {}
                     for i, value in enumerate(unique_values):
                         color_map[value] =self.colors_16[i]
-
-                    self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
-
-                    # 为每个点分配颜色
                     self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
                 else:
-                    # 使用原来的方法
                     self.colors = self.Colors[0](self.min_max_normalization(self.structured_points[self.color_fields]))
-                # print(self.colors)
         self.scatter = gl.GLScatterPlotItem(pos=self.points, color=self.colors, size=self.point_size)
         self.glwidget.addItem(self.scatter)
         if updata_color_bar:
@@ -281,7 +333,6 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
             self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/pause_pcd.png')))
         self.playing = not self.playing
 
-
     def on_slider_value_changed(self):
         print("--on_slider_value_changed")
         if self.current_frame_index != self.frame_slider.value() and self.directory is not None:
@@ -297,18 +348,6 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
             self.color_fields = None
             self.vis_fram()
 
-    def create_coordinate(self):
-        if self.axis_visible:
-            if self.axis:
-                self.glwidget.removeItem(self.axis)
-                self.axis = None
-            self.axis_visible = False
-        else:
-            self.axis = gl.GLAxisItem()
-            self.axis.setSize(x=3, y=3, z=3)
-            self.glwidget.addItem(self.axis)
-            self.axis_visible = True
-
     def update_color_sidebar(self):
         self.color_sidebar.clear()
         for meta in self.metadata:
@@ -321,8 +360,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
 
     def select_dimension(self, meta):
         print("select_dimension")
-        self.Colors = [plt.get_cmap('gist_ncar'), plt.get_cmap('cool'), plt.get_cmap('GnBu'), plt.get_cmap('Greys'),
-                       plt.get_cmap('hot')]  # Reference: https://zhuanlan.zhihu.com/p/114420786
+        self.Colors = [plt.get_cmap('gist_ncar'), plt.get_cmap('cool'), plt.get_cmap('GnBu'), plt.get_cmap('Greys'), plt.get_cmap('hot')]  # Reference: https://zhuanlan.zhihu.com/p/114420786
         self.color_fields = meta
         self.vis_fram()
 

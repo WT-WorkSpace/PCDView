@@ -30,6 +30,9 @@ class PCDViewWidget(QWidget):
         self.glwidget.setWindowTitle('PointCloudViewer')
 
         self.axis_visible = False
+        self.add_bboxes = False
+        # self.bboxes_files = None
+        self.bboxes_directory = None
 
         """调整视角"""
         self.glwidget.opts['distance'] = 15
@@ -51,6 +54,8 @@ class PCDViewWidget(QWidget):
         self.scatter = gl.GLScatterPlotItem(pos=self.raw_points, color=self.colors, size=self.point_size)
         self.glwidget.addItem(self.scatter)
 
+
+
         self.colors_16 = [(255, 0, 0),      # 红色
                         (0, 255, 0),      # 绿色
                         (0, 0, 255),      # 蓝色
@@ -67,6 +72,59 @@ class PCDViewWidget(QWidget):
                         (127, 255, 0),    # 柠檬绿
                         (0, 191, 255),    # 天蓝色
                         (238, 130, 238)]   # 紫罗兰色
+
+        self.class_map ={
+              'Car': (255, 165, 0,255),
+              'Van': (255, 0, 255,255),
+              'Bus': (255, 0, 255,255),
+              'Truck': (0, 255, 255,255),
+              'Semitrailer': (165, 42, 42,255),
+              'Special_vehicles':  (135, 206, 235,255),
+              'Special_ vehicles': (135, 206, 235,255),
+              'Tricyclist': (51, 161, 201,255),
+              'Cycle': (0,255,0,255),
+              'Cyclist':(0,255,0,255),
+              'Pedestrian': (255,0,0,255),
+              'Animal': (128,128,128,255),
+              'others': (255, 255, 255,255),
+        }
+
+    def draw_arrow(self, start_position, direction, length, color):
+        # 计算箭头的终点
+        end_point = start_position + length * np.array(direction)
+        # 归一化方向向量
+        direction_normalized = np.array(direction) / np.linalg.norm(direction)
+        # 定义箭头的参数
+        arrowhead_length = 0.3 * length
+        arrowhead_width = 0.1 * length
+        # 计算箭头头部的基点
+        arrowhead_base = end_point - arrowhead_length * direction_normalized
+        # 计算垂直于方向向量的向量
+        if np.allclose(direction_normalized[:2], [0, 0]):
+            perp_vector = np.array([1, 0, 0])
+        else:
+            perp_vector = np.array([-direction_normalized[1], direction_normalized[0], 0])
+        perp_vector = perp_vector / np.linalg.norm(perp_vector)
+        # 计算箭头头部的两个点
+        arrowhead_point1 = arrowhead_base + arrowhead_width * perp_vector
+        arrowhead_point2 = arrowhead_base - arrowhead_width * perp_vector
+        # 组合所有点来绘制线段
+        points = np.vstack([start_position, end_point, arrowhead_point1, end_point, arrowhead_point2])
+        # 创建并添加线图项
+        arrow = gl.GLLinePlotItem(pos=points, color=color, width=2, antialias=True)
+        return arrow
+
+    def create_coordinate(self):
+        if self.axis_visible:
+            if self.axis:
+                self.glwidget.removeItem(self.axis)
+                self.axis = None
+            self.axis_visible = False
+        else:
+            self.axis = gl.GLAxisItem()
+            self.axis.setSize(x=3, y=3, z=3)
+            self.glwidget.addItem(self.axis)
+            self.axis_visible = True
 
     def save_view(self):
         """
