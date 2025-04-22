@@ -92,7 +92,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.save_view_action.triggered.connect(self.save_view)  # Connect to color selection
         tool_pointsize_menu.addAction(self.save_view_action)
 
-        load_view_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/load_view.png')).pixmap(25, 25))
+        load_view_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/load_view.svg')).pixmap(25, 25))
         self.load_view_action = QAction(load_view_icon, "Load View", self)
         self.load_view_action.triggered.connect(self.load_view)  # Connect to color selection
         tool_pointsize_menu.addAction(self.load_view_action)
