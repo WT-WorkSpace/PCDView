@@ -1,6 +1,6 @@
 import sys
 import os
-import wata
+import json
 from pathlib import Path
 from natsort import natsorted
 from PyQt5.QtWidgets import (
@@ -19,7 +19,9 @@ from widget.opengl_widget import PCDViewWidget
 from utils.utils import pil2qicon
 from utils.load_pcd import get_points_from_pcd_file
 import numpy as np
-
+from utils.load_bboxes_json import get_anno_from_tanway_json
+from pyqtgraph import Vector
+from utils.utils import load_json
 
 class PointCloudViewer(QMainWindow, PCDViewWidget):
     def __init__(self):
@@ -200,7 +202,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.bboxes_directory = QFileDialog.getExistingDirectory(self, "Select bboxes json Directory")
 
         if self.bboxes_directory:
-            self.bboxes_files = natsorted([f for f in os.listdir(self.directory) if f.endswith('.json')])
+            self.bboxes_files = natsorted([f for f in os.listdir(self.bboxes_directory) if f.endswith('.json')])
             self.load_frame()
 
     def open_file(self):
@@ -260,8 +262,6 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         normalized_matrix = (matrix - min_val) / (max_val - min_val)
         return normalized_matrix
 
-
-
     def previous_frame(self):
         if self.current_frame_index > 0:
             self.current_frame_index -= 1
@@ -318,6 +318,104 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.Colors = [plt.get_cmap('gist_ncar'), plt.get_cmap('cool'), plt.get_cmap('GnBu'), plt.get_cmap('Greys'), plt.get_cmap('hot')]  # Reference: https://zhuanlan.zhihu.com/p/114420786
         self.color_fields = meta
         self.vis_fram()
+
+    def save_view(self):
+        view_data_ = self.glwidget.cameraParams()
+        view_data = {
+            "center": [view_data_["center"].x(),view_data_["center"].y(),view_data_["center"].z()],
+            "distance": view_data_["distance"],
+            "rotation": [
+                view_data_["rotation"].scalar(),  # 四元数标量
+                view_data_["rotation"].x(),
+                view_data_["rotation"].y(),
+                view_data_["rotation"].z()
+            ],
+            "fov": view_data_["fov"],
+            "elevation": view_data_["elevation"],
+            "azimuth": view_data_["azimuth"],
+        }
+        file_name, _ = QFileDialog.getSaveFileName(self, "Save View", "", "JSON Files (*.json)")
+        if file_name:
+            with open(file_name, 'w') as f:
+                json.dump(view_data, f, indent=4)
+            print("View saved to:", file_name)
+
+    def load_view(self):
+        """加载保存的视角参数"""
+        file_name, _ = QFileDialog.getOpenFileName(self, "Open View", "", "JSON Files (*.json)")
+        if file_name:
+            with open(file_name, 'r') as f:
+                view_data = json.load(f)
+            rotation = QtGui.QQuaternion(
+                view_data["rotation"][0],  # 标量
+                view_data["rotation"][1],
+                view_data["rotation"][2],
+                view_data["rotation"][3]
+            )
+            view_data_ = {}
+            view_data_["center"] = Vector(*view_data["center"])
+            view_data_["distance"] = view_data["distance"]
+            view_data_["rotation"] = rotation
+            view_data_["fov"] = view_data["fov"]
+            view_data_["elevation"] = view_data['elevation']
+            view_data_["azimuth"] = view_data["azimuth"]
+
+            self.glwidget.setCameraPosition(
+                pos=view_data_["center"],
+                distance=view_data_["distance"],
+                elevation=view_data_["elevation"],
+                azimuth=view_data_["azimuth"]
+            )
+            self.vis_fram()
+
+    def vis_fram(self, updata_color_bar=False):
+        for item in self.current_bbox_items:
+            self.glwidget.removeItem(item)
+        self.current_bbox_items = []
+        if self.bboxes_directory is not None:
+            self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem)+".json")
+
+            if os.path.isfile(self.json_path):
+                json_data = get_anno_from_tanway_json(load_json(self.json_path))
+
+                for i, box in enumerate(json_data["bboxes"]):
+                    x, y, z, l, w, h, yaw = box
+
+                    class_name = json_data["className"][i].replace("TYPE_", "")
+                    if class_name in self.class_map.keys():
+                        bbox_color = self.class_map[class_name]
+                    else:
+                        bbox_color = self.class_map["others"]
+                    color = QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
+
+                    bbox = self.draw_bbox(x, y, z, l, w, h, yaw, color)
+                    class_name_text = gl.GLTextItem(text=class_name, pos=(x, y, z+1), color=color, font=QtGui.QFont('Helvetica', 10))
+                    arrow = self.draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(yaw),np.sin(yaw),0],length= l/2 ,color = color)
+
+                    self.glwidget.addItem(bbox)
+                    self.glwidget.addItem(arrow)
+                    self.glwidget.addItem(class_name_text)
+                    self.current_bbox_items.extend([bbox,arrow,class_name_text])
+
+        if self.scatter:
+            self.glwidget.removeItem(self.scatter)
+
+        self.points = self.raw_points[:, :3]
+        if self.color_fields is not None:
+            if max(self.structured_points[self.color_fields]) != 0:
+                unique_values = np.unique(self.structured_points[self.color_fields])
+                num_unique_values = len(unique_values)
+                if num_unique_values <= 16:
+                    color_map = {}
+                    for i, value in enumerate(unique_values):
+                        color_map[value] =self.colors_16[i]
+                    self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
+                else:
+                    self.colors = self.Colors[0](self.min_max_normalization(self.structured_points[self.color_fields]))
+        self.scatter = gl.GLScatterPlotItem(pos=self.points, color=self.colors, size=self.point_size)
+        self.glwidget.addItem(self.scatter)
+        if updata_color_bar:
+            self.update_color_sidebar()
 
 
 if __name__ == "__main__":
