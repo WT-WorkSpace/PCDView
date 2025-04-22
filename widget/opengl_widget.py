@@ -1,12 +1,16 @@
-from PyQt5.QtWidgets import QWidget, QFileDialog
 import pyqtgraph.opengl as gl
 from utils.move_pcd import move_pcd_with_xyzrpy
-import matplotlib.pyplot as plt
 import os
 from PIL import Image, ImageFont, ImageDraw
 import json
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
+import wata
+from pathlib import Path
+from PyQt5.QtWidgets import QFileDialog, QWidget
+from PyQt5 import QtGui
+import matplotlib.pyplot as plt
+from pyqtgraph import Vector
 
 def text_3d(text, density=10, font= os.path.join(os.path.dirname(os.path.abspath(__file__)),'../icons/fengguangming.ttf'), font_size=10):
     font_obj = ImageFont.truetype(os.path.join(os.path.dirname(os.path.abspath(__file__)),'../icons/fengguangming.ttf'), int(font_size * density))
@@ -31,7 +35,6 @@ class PCDViewWidget(QWidget):
 
         self.axis_visible = False
         self.add_bboxes = False
-        # self.bboxes_files = None
         self.bboxes_directory = None
 
         """调整视角"""
@@ -53,8 +56,6 @@ class PCDViewWidget(QWidget):
         self.point_size = self.point_size_list[0]
         self.scatter = gl.GLScatterPlotItem(pos=self.raw_points, color=self.colors, size=self.point_size)
         self.glwidget.addItem(self.scatter)
-
-
 
         self.colors_16 = [(255, 0, 0),      # 红色
                         (0, 255, 0),      # 绿色
@@ -90,27 +91,19 @@ class PCDViewWidget(QWidget):
         }
 
     def draw_arrow(self, start_position, direction, length, color):
-        # 计算箭头的终点
         end_point = start_position + length * np.array(direction)
-        # 归一化方向向量
         direction_normalized = np.array(direction) / np.linalg.norm(direction)
-        # 定义箭头的参数
         arrowhead_length = 0.3 * length
         arrowhead_width = 0.1 * length
-        # 计算箭头头部的基点
         arrowhead_base = end_point - arrowhead_length * direction_normalized
-        # 计算垂直于方向向量的向量
         if np.allclose(direction_normalized[:2], [0, 0]):
             perp_vector = np.array([1, 0, 0])
         else:
             perp_vector = np.array([-direction_normalized[1], direction_normalized[0], 0])
         perp_vector = perp_vector / np.linalg.norm(perp_vector)
-        # 计算箭头头部的两个点
         arrowhead_point1 = arrowhead_base + arrowhead_width * perp_vector
         arrowhead_point2 = arrowhead_base - arrowhead_width * perp_vector
-        # 组合所有点来绘制线段
         points = np.vstack([start_position, end_point, arrowhead_point1, end_point, arrowhead_point2])
-        # 创建并添加线图项
         arrow = gl.GLLinePlotItem(pos=points, color=color, width=2, antialias=True)
         return arrow
 
@@ -127,38 +120,108 @@ class PCDViewWidget(QWidget):
             self.axis_visible = True
 
     def save_view(self):
-        """
-        Save the current camera view (view matrix and projection matrix) to a file.
-        """
-        # Get the current view matrix and projection matrix
-        view_matrix = self.glwidget.viewMatrix()
-        projection_matrix = self.glwidget.projectionMatrix()
-
-        # Convert matrices to lists for easy saving (as JSON)
-        view_matrix_list = view_matrix.flatten().tolist()
-        projection_matrix_list = projection_matrix.flatten().tolist()
-
-        # Save the matrices to a JSON file
+        view_data_ = self.glwidget.cameraParams()
         view_data = {
-            "view_matrix": view_matrix_list,
-            "projection_matrix": projection_matrix_list
+            "center": list(view_data_["center"]),
+            "distance": view_data_["distance"],
+            "rotation": [
+                view_data_["rotation"].scalar(),  # 四元数标量
+                view_data_["rotation"].x(),
+                view_data_["rotation"].y(),
+                view_data_["rotation"].z()
+            ],
+            "fov": view_data_["fov"],
+            "elevation": view_data_["elevation"],
+            "azimuth": view_data_["azimuth"],
         }
         file_name, _ = QFileDialog.getSaveFileName(self, "Save View", "", "JSON Files (*.json)")
         if file_name:
             with open(file_name, 'w') as f:
                 json.dump(view_data, f, indent=4)
-        print("View saved to:", file_name)
+            print("View saved to:", file_name)
 
     def load_view(self):
-        """
-        Load a saved camera view from a file and apply it to the current view.
-        """
+        """加载保存的视角参数"""
         file_name, _ = QFileDialog.getOpenFileName(self, "Open View", "", "JSON Files (*.json)")
         if file_name:
             with open(file_name, 'r') as f:
                 view_data = json.load(f)
-            view_matrix = np.array(view_data["view_matrix"]).reshape(4, 4)
-            projection_matrix = np.array(view_data["projection_matrix"]).reshape(4, 4)
-            self.glwidget.setViewMatrix(view_matrix)
-            self.glwidget.setProjectionMatrix(projection_matrix)
-            print("View loaded from:", file_name)
+            rotation = QtGui.QQuaternion(
+                view_data["rotation"][0],  # 标量
+                view_data["rotation"][1],
+                view_data["rotation"][2],
+                view_data["rotation"][3]
+            )
+            view_data_ = {}
+            view_data_["center"] = Vector(*view_data["center"])
+            view_data_["distance"] = view_data["distance"]
+            view_data_["rotation"] = rotation
+            view_data_["fov"] = view_data["fov"]
+            view_data_["elevation"] = view_data['elevation']
+            view_data_["azimuth"] = view_data["azimuth"]
+
+            self.glwidget.setCameraPosition(
+                pos=view_data_["center"],
+                distance=view_data_["distance"],
+                elevation=view_data_["elevation"],
+                azimuth=view_data_["azimuth"]
+            )
+            self.vis_fram()
+
+    def vis_fram(self, updata_color_bar=False):
+
+        for item in self.current_bbox_items:
+            self.glwidget.removeItem(item)
+        self.current_bbox_items = []
+
+        if self.bboxes_directory is not None:
+            pcd_stem = Path(self.pcd_file).stem
+            print(self.bboxes_directory)
+            self.json_path = os.path.join(str(self.bboxes_directory), str(pcd_stem)+".json")
+            if os.path.isfile(self.json_path):
+                json_data = wata.PointCloudProcess.get_anno_from_tanway_json(wata.FileProcess.load_file(self.json_path))
+
+                for i, box in enumerate(json_data["bboxes"]):
+                    x, y, z, l, w, h, yaw = box
+                    deg_yaw = np.rad2deg(yaw)
+                    class_name = json_data["className"][i].split("TYPE_")[1]
+                    if class_name in self.class_map.keys():
+                        bbox_color = self.class_map[class_name]
+                    else:
+                        bbox_color = self.class_map["others"]
+
+                    bbox = gl.GLBoxItem(size=QtGui.QVector3D(l, w, h), color=QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]), glOptions='opaque')
+                    bbox.translate(-l/2, -w/2, -h/2)
+                    bbox.rotate(deg_yaw, 0, 0, 1)
+                    bbox.translate(x,y,z)
+
+                    class_name_text = gl.GLTextItem(text=class_name, pos=(x, y, z+1), color=QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]), font=QtGui.QFont('Helvetica', 12))
+                    arrow = self.draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(yaw),np.sin(yaw),0],length= l/2 ,color = QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]))
+
+                    self.glwidget.addItem(bbox)
+                    self.glwidget.addItem(arrow)
+                    self.glwidget.addItem(class_name_text)
+
+                    self.current_bbox_items.append(bbox)
+                    self.current_bbox_items.append(arrow)
+                    self.current_bbox_items.append(class_name_text)
+
+        if self.scatter:
+            self.glwidget.removeItem(self.scatter)
+
+        self.points = self.raw_points[:, :3]
+        if self.color_fields is not None:
+            if max(self.structured_points[self.color_fields]) != 0:
+                unique_values = np.unique(self.structured_points[self.color_fields])
+                num_unique_values = len(unique_values)
+                if num_unique_values <= 16:
+                    color_map = {}
+                    for i, value in enumerate(unique_values):
+                        color_map[value] =self.colors_16[i]
+                    self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
+                else:
+                    self.colors = self.Colors[0](self.min_max_normalization(self.structured_points[self.color_fields]))
+        self.scatter = gl.GLScatterPlotItem(pos=self.points, color=self.colors, size=self.point_size)
+        self.glwidget.addItem(self.scatter)
+        if updata_color_bar:
+            self.update_color_sidebar()

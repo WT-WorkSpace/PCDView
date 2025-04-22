@@ -55,7 +55,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.open_dir_action.triggered.connect(self.open_directory)
         file_menu.addAction(self.open_dir_action)
 
-        open_bboxes_dir_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/open_dir.png')).pixmap(25, 25))
+        open_bboxes_dir_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/open_boxes_dir.svg')).pixmap(25, 25))
         self.open_bboxes_dir_action = QAction(open_bboxes_dir_icon, "Open Directory", self)
         self.open_bboxes_dir_action.triggered.connect(self.open_bboxes_directory)
         file_menu.addAction(self.open_bboxes_dir_action)
@@ -85,6 +85,16 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.coordinate.triggered.connect(self.create_coordinate)  # Connect to color selection
         tool_pointsize_menu.addAction(self.coordinate)
 
+        save_view_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/save_view.png')).pixmap(25, 25))
+        self.save_view_action = QAction(save_view_icon, "Save View", self)
+        self.save_view_action.triggered.connect(self.save_view)  # Connect to color selection
+        tool_pointsize_menu.addAction(self.save_view_action)
+
+        load_view_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/load_view.png')).pixmap(25, 25))
+        self.load_view_action = QAction(load_view_icon, "Load View", self)
+        self.load_view_action.triggered.connect(self.load_view)  # Connect to color selection
+        tool_pointsize_menu.addAction(self.load_view_action)
+
         # Create a toolbar for quick access to file actions and add it using addToolBar
         self.toolbar = QToolBar(self)
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
@@ -99,9 +109,10 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.toolbar.addAction(self.points_color)  # Add color button to toolbar
         self.toolbar.addAction(self.coordinate)
 
+        self.toolbar.addAction(self.save_view_action)
+        self.toolbar.addAction(self.load_view_action)
+
         self.toolbar.setStyleSheet("QToolBar { background-color: white; }")
-
-
 
         self.color_sidebar = QToolBar("colors", self)
         self.addToolBar(Qt.RightToolBarArea, self.color_sidebar)
@@ -249,63 +260,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         normalized_matrix = (matrix - min_val) / (max_val - min_val)
         return normalized_matrix
 
-    def vis_fram(self, updata_color_bar=False):
 
-        for item in self.current_bbox_items:
-            self.glwidget.removeItem(item)
-        self.current_bbox_items = []
-
-        if self.bboxes_directory is not None:
-            pcd_stem = Path(self.pcd_file).stem
-            print(self.bboxes_directory)
-            self.json_path = os.path.join(str(self.bboxes_directory), str(pcd_stem)+".json")
-            if os.path.isfile(self.json_path):
-                json_data = wata.PointCloudProcess.get_anno_from_tanway_json(wata.FileProcess.load_file(self.json_path))
-
-                for i, box in enumerate(json_data["bboxes"]):
-                    x, y, z, l, w, h, yaw = box
-                    deg_yaw = np.rad2deg(yaw)
-                    class_name = json_data["className"][i].split("TYPE_")[1]
-                    if class_name in self.class_map.keys():
-                        bbox_color = self.class_map[class_name]
-                    else:
-                        bbox_color = self.class_map["others"]
-
-                    bbox = gl.GLBoxItem(size=QtGui.QVector3D(l, w, h), color=QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]), glOptions='opaque')
-                    bbox.translate(-l/2, -w/2, -h/2)
-                    bbox.rotate(deg_yaw, 0, 0, 1)
-                    bbox.translate(x,y,z)
-
-                    class_name_text = gl.GLTextItem(text=class_name, pos=(x, y, z+1), color=QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]), font=QtGui.QFont('Helvetica', 12))
-                    arrow = self.draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(yaw),np.sin(yaw),0],length= l/2 ,color = QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3]))
-
-                    self.glwidget.addItem(bbox)
-                    self.glwidget.addItem(arrow)
-                    self.glwidget.addItem(class_name_text)
-
-                    self.current_bbox_items.append(bbox)
-                    self.current_bbox_items.append(arrow)
-                    self.current_bbox_items.append(class_name_text)
-
-        if self.scatter:
-            self.glwidget.removeItem(self.scatter)
-
-        self.points = self.raw_points[:, :3]
-        if self.color_fields is not None:
-            if max(self.structured_points[self.color_fields]) != 0:
-                unique_values = np.unique(self.structured_points[self.color_fields])
-                num_unique_values = len(unique_values)
-                if num_unique_values <= 16:
-                    color_map = {}
-                    for i, value in enumerate(unique_values):
-                        color_map[value] =self.colors_16[i]
-                    self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
-                else:
-                    self.colors = self.Colors[0](self.min_max_normalization(self.structured_points[self.color_fields]))
-        self.scatter = gl.GLScatterPlotItem(pos=self.points, color=self.colors, size=self.point_size)
-        self.glwidget.addItem(self.scatter)
-        if updata_color_bar:
-            self.update_color_sidebar()
 
     def previous_frame(self):
         if self.current_frame_index > 0:
