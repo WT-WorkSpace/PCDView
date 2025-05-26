@@ -1,126 +1,64 @@
 import sys
 import os
 import json
+import numpy as np
 from pathlib import Path
 from natsort import natsorted
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QFileDialog,
-    QLabel, QSizePolicy, QSlider, QMenuBar,
-    QAction, QToolBar, QWidget, QPushButton,
-    QVBoxLayout, QHBoxLayout, QColorDialog,
-)
-from PyQt5 import QtCore, QtWidgets, QtGui
 import matplotlib.pyplot as plt
-from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QFont, QColor, QIcon
 import pyqtgraph.opengl as gl
-from pyqtgraph.opengl import GLScatterPlotItem
+from pyqtgraph import Vector
+from pyqtgraph.opengl import GLScatterPlotItem, GLTextItem, GLScatterPlotItem
+from PyQt5.QtGui import QFont, QColor, QIcon, QQuaternion, QMouseEvent
+from PyQt5 import QtCore, QtGui
+from PyQt5.QtCore import QTimer, Qt
+from utils.qt_utils import draw_arrow, draw_bbox
+from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog
+from PyQt5.QtWidgets import QLabel, QSizePolicy, QSlider, QMenuBar
+from PyQt5.QtWidgets import QAction, QToolBar, QWidget, QPushButton, QColorDialog
+
 from widget.opengl_widget import PCDViewWidget
 from utils.utils import pil2qicon
 from utils.load_pcd import get_points_from_pcd_file
-import numpy as np
 from utils.load_bboxes_json import get_anno_from_tanway_json
-from pyqtgraph import Vector
+
 from utils.utils import load_json
 
 class PointCloudViewer(QMainWindow, PCDViewWidget):
     def __init__(self):
         QMainWindow.__init__(self)
         PCDViewWidget.__init__(self)
+        self.init_ui()
+        self.create_menus()
+        self.create_toolbar()
+        self.create_controls()
+        self.init_state()
+
+    def init_ui(self):
         self.curpath = os.path.dirname(os.path.abspath(__file__))
         self.setWindowTitle("Point Cloud Viewer")
         self.setGeometry(100, 100, 800, 600)
-
-        self.current_bbox_items = []
-
-        # Create a central widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-
-        # Create a menu bar
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
         self.menu_bar = QMenuBar(self)
         self.setMenuBar(self.menu_bar)
 
-        file_menu = self.menu_bar.addMenu("File")
-        tool_menu = self.menu_bar.addMenu("Tools")
-        tool_pointsize_menu = tool_menu.addMenu("Point Size")
+    def init_state(self):
+        self.point_cloud_files = []
+        self.current_frame_index = -1
+        self.scatter_item = GLScatterPlotItem()
+        self.playing = False  # Flag for play/pause state
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.next_frame)  # Timer action for auto-frame transition
+        self.colors = QColor(0, 0, 255).getRgbF()
+        self.color_fields = None
+        self.metadata = None
+        self.current_bbox_items = []
 
-        # Create "Open File" action
-        open_file_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/open.png')).pixmap(25, 25))
-        self.open_file_action = QAction(open_file_icon, "Open File", self)
-        self.open_file_action.triggered.connect(self.open_file)
-        file_menu.addAction(self.open_file_action)
+        self.right_button_pressed = False
+        self.last_mouse_pos = None
 
-        # Create "Open Directory" action
-        open_dir_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/open_dir.png')).pixmap(25, 25))
-        self.open_dir_action = QAction(open_dir_icon, "Open Directory", self)
-        self.open_dir_action.triggered.connect(self.open_directory)
-        file_menu.addAction(self.open_dir_action)
-
-        open_bboxes_dir_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/open_boxes_dir.svg')).pixmap(25, 25))
-        self.open_bboxes_dir_action = QAction(open_bboxes_dir_icon, "Open Directory", self)
-        self.open_bboxes_dir_action.triggered.connect(self.open_bboxes_directory)
-        file_menu.addAction(self.open_bboxes_dir_action)
-
-        self.set_pointsize = QAction(QIcon(os.path.join(self.curpath, 'icons/pointsize.png')), "Point Size", self)
-        self.set_pointsize.triggered.connect(self.open_file)
-
-        pointsize_increase_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/pointsize_increase.png')).pixmap(25, 25))
-        self.increase_pointsize_action = QAction(pointsize_increase_icon, "Point Size +", self)
-        self.increase_pointsize_action.triggered.connect(self.increase_points_size)
-        tool_pointsize_menu.addAction(self.increase_pointsize_action)
-
-        pointsize_decrease_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/pointsize_decrease.png')).pixmap(25, 25))
-        self.decrease_pointsize_action = QAction(pointsize_decrease_icon, "Point Size -", self)
-        self.decrease_pointsize_action.triggered.connect(self.decrease_points_size)
-        tool_pointsize_menu.addAction(self.decrease_pointsize_action)
-
-        # Add "Color" action
-        point_color_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/color.png')).pixmap(25, 25))
-        self.points_color = QAction(point_color_icon, "Color", self)
-        self.points_color.triggered.connect(self.select_color)  # Connect to color selection
-        tool_pointsize_menu.addAction(self.points_color)
-
-        # Add "Coordinate axis" action
-        coordinate_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/coordinate.png')).pixmap(25, 25))
-        self.coordinate = QAction(coordinate_icon, "Coordinate", self)
-        self.coordinate.triggered.connect(self.create_coordinate)  # Connect to color selection
-        tool_pointsize_menu.addAction(self.coordinate)
-
-        save_view_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/save_view.png')).pixmap(25, 25))
-        self.save_view_action = QAction(save_view_icon, "Save View", self)
-        self.save_view_action.triggered.connect(self.save_view)  # Connect to color selection
-        tool_pointsize_menu.addAction(self.save_view_action)
-
-        load_view_icon = QIcon(QIcon(os.path.join(self.curpath, 'icons/load_view.svg')).pixmap(25, 25))
-        self.load_view_action = QAction(load_view_icon, "Load View", self)
-        self.load_view_action.triggered.connect(self.load_view)  # Connect to color selection
-        tool_pointsize_menu.addAction(self.load_view_action)
-
-        # Create a toolbar for quick access to file actions and add it using addToolBar
-        self.toolbar = QToolBar(self)
-        self.addToolBar(Qt.TopToolBarArea, self.toolbar)
-        self.toolbar.addAction(self.open_file_action)
-        self.toolbar.addAction(self.open_dir_action)
-        self.toolbar.addAction(self.open_bboxes_dir_action)
-        self.toolbar.addSeparator()
-
-        self.toolbar.addAction(self.increase_pointsize_action)
-        self.toolbar.addAction(self.decrease_pointsize_action)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.points_color)  # Add color button to toolbar
-        self.toolbar.addAction(self.coordinate)
-
-        self.toolbar.addAction(self.save_view_action)
-        self.toolbar.addAction(self.load_view_action)
-
-        self.toolbar.setStyleSheet("QToolBar { background-color: white; }")
-
-        self.color_sidebar = QToolBar("colors", self)
-        self.addToolBar(Qt.RightToolBarArea, self.color_sidebar)
-        self.color_sidebar.setVisible(False)  # Initially hidden
-        self.color_sidebar.setStyleSheet("QToolBar { background-color: white; }")
-
+    def create_controls(self):
         self.play_button = QPushButton(self)
         self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
         self.play_button.setIconSize(self.play_button.sizeHint())
@@ -159,25 +97,74 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         control_layout.addWidget(self.frame_info_label)
         control_layout.addWidget(self.frame_slider)
 
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.glwidget)
+        main_layout.addLayout(control_layout)  # Add control buttons and slider in the same row
+        self.central_widget.setLayout(main_layout)
+
         self.play_button.clicked.connect(self.toggle_play_pause)
         self.prev_button.clicked.connect(self.previous_frame)
         self.next_button.clicked.connect(self.next_frame)
 
-        main_layout = QVBoxLayout()
-        main_layout.addWidget(self.glwidget)
-        main_layout.addLayout(control_layout)  # Add control buttons and slider in the same row
-        central_widget.setLayout(main_layout)
+    def create_toolbar(self):
+        self.toolbar = QToolBar(self)
+        self.addToolBar(Qt.TopToolBarArea, self.toolbar)
+        self.toolbar.addAction(self.open_file_action)
+        self.toolbar.addAction(self.open_dir_action)
+        self.toolbar.addAction(self.open_bboxes_dir_action)
+        self.toolbar.addSeparator()
 
-        self.point_cloud_files = []
-        self.current_frame_index = -1
-        self.scatter_item = GLScatterPlotItem()
-        self.playing = False  # Flag for play/pause state
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.next_frame)  # Timer action for auto-frame transition
+        self.toolbar.addAction(self.increase_pointsize_action)
+        self.toolbar.addAction(self.decrease_pointsize_action)
+        self.toolbar.addSeparator()
+        self.toolbar.addAction(self.points_color)  # Add color button to toolbar
+        self.toolbar.addAction(self.coordinate)
 
-        self.colors = QColor(0, 0, 255).getRgbF()
-        self.color_fields = None
-        self.metadata = None
+        self.toolbar.addAction(self.save_view_action)
+        self.toolbar.addAction(self.load_view_action)
+
+        self.toolbar.setStyleSheet("QToolBar { background-color: white; }")
+
+        self.color_sidebar = QToolBar("colors", self)
+        self.addToolBar(Qt.RightToolBarArea, self.color_sidebar)
+        self.color_sidebar.setVisible(False)  # Initially hidden
+        self.color_sidebar.setStyleSheet("QToolBar { background-color: white; }")
+
+    def create_menus(self):
+        self.create_file_menus()
+        self.create_tools_menus()
+
+    def create_file_menus(self):
+        file_menu = self.menu_bar.addMenu("File")
+        self.open_file_action = self.create_action("Open File", 'icons/open.png', self.open_file)
+        self.open_dir_action = self.create_action("Open Directory", 'icons/open_dir.png', self.open_directory)
+        self.open_bboxes_dir_action = self.create_action("Open BBoxes Dir", 'icons/open_boxes_dir.svg',self.open_bboxes_directory)
+        file_menu.addAction(self.open_file_action)
+        file_menu.addAction(self.open_dir_action)
+        file_menu.addAction(self.open_bboxes_dir_action)
+
+    def create_tools_menus(self):
+        tool_menu = self.menu_bar.addMenu("Tools")
+        tool_pointsize_menu = tool_menu.addMenu("Point Size")
+        self.increase_pointsize_action = self.create_action("Point Size +", 'icons/pointsize_increase.png', self.increase_points_size)
+        self.decrease_pointsize_action = self.create_action("Point Size -", 'icons/pointsize_decrease.png', self.decrease_points_size)
+        self.points_color = self.create_action("Color", 'icons/color.png', self.select_color)
+        self.coordinate = self.create_action("Coordinate", 'icons/coordinate.png', self.create_coordinate)
+        self.save_view_action = self.create_action("Save View", 'icons/save_view.png', self.save_view)
+        self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
+
+        tool_pointsize_menu.addAction(self.increase_pointsize_action)
+        tool_pointsize_menu.addAction(self.decrease_pointsize_action)
+        tool_menu.addAction(self.points_color)
+        tool_menu.addAction(self.coordinate)
+        tool_menu.addAction(self.save_view_action)
+        tool_menu.addAction(self.load_view_action)
+
+    def create_action(self, name, icon_path, handler):
+        icon = QIcon(os.path.join(self.curpath, icon_path))
+        action = QAction(icon, name, self)
+        action.triggered.connect(handler)
+        return action
 
     def open_directory(self):
         self.timer.stop()  # Stop the timer to avoid auto-frame transition
@@ -346,7 +333,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         if file_name:
             with open(file_name, 'r') as f:
                 view_data = json.load(f)
-            rotation = QtGui.QQuaternion(
+            rotation = QQuaternion(
                 view_data["rotation"][0],  # 标量
                 view_data["rotation"][1],
                 view_data["rotation"][2],
@@ -386,11 +373,11 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
                         bbox_color = self.class_map[class_name]
                     else:
                         bbox_color = self.class_map["others"]
-                    color = QtGui.QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
+                    color = QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
 
-                    bbox = self.draw_bbox(x, y, z, l, w, h, yaw, color)
-                    class_name_text = gl.GLTextItem(text=class_name, pos=(x, y, z+1), color=color, font=QtGui.QFont('Helvetica', 10))
-                    arrow = self.draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(yaw),np.sin(yaw),0],length= l/2 ,color = color)
+                    bbox = draw_bbox(x, y, z, l, w, h, yaw, color)
+                    class_name_text = GLTextItem(text=class_name, pos=(x, y, z+1), color=color, font=QFont('Helvetica', 10))
+                    arrow = draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(yaw),np.sin(yaw),0],length= l/2 ,color = color)
 
                     self.glwidget.addItem(bbox)
                     self.glwidget.addItem(arrow)
@@ -405,14 +392,23 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
             if max(self.structured_points[self.color_fields]) != 0:
                 unique_values = np.unique(self.structured_points[self.color_fields])
                 num_unique_values = len(unique_values)
-                if num_unique_values <= 16:
+                print(unique_values)
+                print(type(unique_values[0]))
+                if all(isinstance(x, np.int32) for x in unique_values)  and max(unique_values) < 16 and min(unique_values)>=0:
+                    color_map = {}
+                    for i, value in enumerate(unique_values):
+                        color_map[value] =self.colors_16[value]
+                    self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
+
+                elif num_unique_values <= 16:
                     color_map = {}
                     for i, value in enumerate(unique_values):
                         color_map[value] =self.colors_16[i]
                     self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
                 else:
                     self.colors = self.Colors[0](self.min_max_normalization(self.structured_points[self.color_fields]))
-        self.scatter = gl.GLScatterPlotItem(pos=self.points, color=self.colors, size=self.point_size)
+                    
+        self.scatter = GLScatterPlotItem(pos=self.points, color=self.colors, size=self.point_size)
         self.glwidget.addItem(self.scatter)
         if updata_color_bar:
             self.update_color_sidebar()
