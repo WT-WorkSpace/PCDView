@@ -38,9 +38,9 @@ class PCDViewWidget(QWidget):
         self.color_fields = None
         self.bboxes_directory = None
 
-        """调整视角"""
+        """调整视角：默认俯视图"""
         self.glwidget.opts['distance'] = 15
-        self.glwidget.setCameraPosition(distance=self.glwidget.opts['distance'], elevation=0, azimuth=0)
+        self.glwidget.setCameraPosition(distance=self.glwidget.opts['distance'], elevation=90, azimuth=0)
 
         """添加点云到视图窗口中"""
         curpath = os.path.dirname(os.path.abspath(__file__))

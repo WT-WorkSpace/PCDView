@@ -1,4 +1,5 @@
-pyinstaller --onefile --windowed \
+# 使用 miniconda view 环境的 Python 运行 PyInstaller
+/home/wt/miniconda3/envs/view/bin/python -m PyInstaller --onefile --windowed \
   --add-data "icons/color.png:icons"\
   --add-data "icons/coordinate.png:icons"\
   --add-data "icons/fengguangming.ttf:icons"\
@@ -16,3 +17,6 @@ pyinstaller --onefile --windowed \
   --add-data "icons/save_view.png:icons"\
   --add-data "icons/open_boxes_dir.svg:icons"\
   qtvis.py
+
+rm ~/Desktop/qtvis
+mv dist/qtvis ~/Desktop/

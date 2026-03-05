@@ -6,6 +6,6 @@ pyqtgraph
 PyOpenGL
 python-lzf
 scipy
-pillow
+pillow ~= 10.4.0
 setuptools
 pyinstaller

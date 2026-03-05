@@ -40,7 +40,6 @@ def get_anno_from_tanway_json(json_data):
                 id_list.append(agent["ID"])
             else:
                 id_list.append(None)
-
             if 'tag' in agent:
                 if 'movement_state' in agent["tag"]:
                     movement_state_list.append(agent["tag"]["movement_state"])
@@ -52,10 +51,25 @@ def get_anno_from_tanway_json(json_data):
                 else:
                     confidence_list.append(None)
 
-                if 'link_id' in agent["tag"]:
-                    link_id_list.append(agent["tag"]["link_id"])
+                link_id_val = agent["tag"].get("link_id") if "link_id" in agent["tag"] else agent["tag"].get("link_ID")
+                link_id_list.append(link_id_val)
+            elif 'tags' in agent:
+                if 'movement_state' in agent["tags"]:
+                    movement_state_list.append(agent["tags"]["movement_state"])
                 else:
-                    link_id_list.append(None)
+                    movement_state_list.append(None)
+
+                if 'confidence' in agent["tags"]:
+                    confidence_list.append(agent["tags"]["confidence"])
+                else:
+                    confidence_list.append(None)
+
+                link_id_val = agent["tags"].get("link_id") if "link_id" in agent["tags"] else agent["tags"].get("link_ID")
+                link_id_list.append(link_id_val)
+            else:
+                confidence_list.append(None)
+                movement_state_list.append(None)
+                link_id_list.append(None)
 
             numPoints = [None] * 10
             for key in agent.keys():
