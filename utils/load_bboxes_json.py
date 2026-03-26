@@ -91,6 +91,68 @@ def get_anno_from_tanway_json(json_data):
         return output
 
 
+def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
+    """
+    将 bbox_infos 保存为 Tanway JSON 格式。
+    bbox_infos: list of dict, 每个含 x,y,z,l,w,h,yaw, class_name, 及可选的 id, link_id, pitch, roll 等。
+    original_agents: 原始 JSON 的 agent 列表，用于保留额外字段；若为 None 则仅用 bbox_infos 生成。
+    """
+    agents_out = []
+    for i, info in enumerate(bbox_infos):
+        x = float(info.get("x", 0))
+        y = float(info.get("y", 0))
+        z = float(info.get("z", 0))
+        l = float(info.get("l", 1))
+        w = float(info.get("w", 1))
+        h = float(info.get("h", 1))
+        yaw = float(info.get("yaw", 0))
+        pitch = float(info.get("pitch", 0))
+        roll = float(info.get("roll", 0))
+        class_name = info.get("class_name", "others")
+        if "TYPE_" not in class_name and class_name != "others":
+            type_str = "TYPE_" + class_name
+        else:
+            type_str = class_name
+
+        if original_agents is not None and i < len(original_agents):
+            agent = dict(original_agents[i])
+        else:
+            agent = {
+                "position3d": {"x": 0, "y": 0, "z": 0},
+                "size3d": {"x": 1, "y": 1, "z": 1},
+                "heading": 0,
+                "type": "others",
+                "pitch": 0,
+                "roll": 0,
+                "ID": None,
+                "tag": {"link_id": None, "confidence": None, "movement_state": None},
+            }
+
+        agent["position3d"] = {"x": x, "y": y, "z": z}
+        agent["size3d"] = {"x": l, "y": w, "z": h}
+        agent["heading"] = yaw
+        agent["type"] = type_str
+        agent["pitch"] = pitch
+        if "roll" in agent or roll != 0:
+            agent["roll"] = roll
+
+        bid = info.get("id")
+        if bid is not None:
+            agent["ID"] = bid
+        link_id = info.get("link_id")
+        if link_id is not None:
+            tag = agent.get("tag") or agent.get("tags") or {}
+            if isinstance(tag, dict):
+                tag = dict(tag)
+                tag["link_id"] = link_id
+                agent["tag"] = tag
+
+        agents_out.append(agent)
+
+    with open(json_path, "w", encoding="UTF-8") as f:
+        json.dump(agents_out, f, indent=2, ensure_ascii=False)
+
+
 def get_anno_from_beisai_json(label_path):
     '''
     **功能描述**: 读取 beisai 平台 训练标签 为anno格式
