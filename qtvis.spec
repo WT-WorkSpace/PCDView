@@ -5,7 +5,7 @@ a = Analysis(
     ['qtvis.py'],
     pathex=[],
     binaries=[],
-    datas=[('icons/color.svg', 'icons'), ('icons/coordinate.svg', 'icons'), ('icons/fengguangming.ttf', 'icons'), ('icons/next.png', 'icons'), ('icons/open.png', 'icons'), ('icons/open_dir.png', 'icons'), ('icons/open_folder.svg', 'icons'), ('icons/pause_pcd.png', 'icons'), ('icons/play_pcd.png', 'icons'), ('icons/pointsize.png', 'icons'), ('icons/pointsize_decrease.png', 'icons'), ('icons/pointsize_increase.png', 'icons'), ('icons/prev_pcd.png', 'icons'), ('icons/load_view.svg', 'icons'), ('icons/save_view.svg', 'icons'), ('icons/open_boxes_dir.svg', 'icons')],
+    datas=[('icons/color.svg', 'icons'), ('icons/coordinate.svg', 'icons'), ('icons/fengguangming.ttf', 'icons'), ('icons/next.png', 'icons'), ('icons/open.svg', 'icons'), ('icons/open_dir.svg', 'icons'), ('icons/box_selection.svg', 'icons'), ('icons/cancel_box_selection.svg', 'icons'), ('icons/mask.svg', 'icons'), ('icons/pause_pcd.png', 'icons'), ('icons/play_pcd.png', 'icons'), ('icons/pointsize.png', 'icons'), ('icons/pointsize_decrease.png', 'icons'), ('icons/pointsize_increase.png', 'icons'), ('icons/prev_pcd.png', 'icons'), ('icons/load_view.svg', 'icons'), ('icons/save_view.svg', 'icons'), ('icons/open_boxes_dir.svg', 'icons'), ('icons/wangge.svg', 'icons'), ('icons/add_bbox.svg', 'icons')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

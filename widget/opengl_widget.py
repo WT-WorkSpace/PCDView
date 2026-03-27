@@ -71,6 +71,8 @@ class PCDViewWidget(QWidget):
         self.add_bboxes = False
         self.color_fields = None
         self.bboxes_directory = None
+        # 坐标轴由 3 条粗线段构成（比 GLAxisItem 的默认细线更粗）
+        self.axis = None
 
         """调整视角：默认俯视图"""
         self.glwidget.opts['distance'] = 15
@@ -94,11 +96,41 @@ class PCDViewWidget(QWidget):
     def create_coordinate(self):
         if self.axis_visible:
             if self.axis:
-                self.glwidget.removeItem(self.axis)
+                # self.axis 可能是 GLScatter/GLLine 的列表
+                if isinstance(self.axis, (list, tuple)):
+                    for it in self.axis:
+                        if it is not None:
+                            self.glwidget.removeItem(it)
+                else:
+                    self.glwidget.removeItem(self.axis)
                 self.axis = None
             self.axis_visible = False
         else:
-            self.axis = gl.GLAxisItem()
-            self.axis.setSize(x=3, y=3, z=3)
-            self.glwidget.addItem(self.axis)
+            axis_len = 3
+            # width 单位为屏幕像素宽度，可按需调大
+            axis_width = 4
+
+            # 三条粗直线：X 红、Y 绿、Z 蓝
+            x_line = gl.GLLinePlotItem(
+                pos=np.array([[0, 0, 0], [axis_len, 0, 0]], dtype=np.float32),
+                color=(1.0, 0.2, 0.2, 1.0),
+                width=axis_width,
+                antialias=True,
+            )
+            y_line = gl.GLLinePlotItem(
+                pos=np.array([[0, 0, 0], [0, axis_len, 0]], dtype=np.float32),
+                color=(0.2, 1.0, 0.2, 1.0),
+                width=axis_width,
+                antialias=True,
+            )
+            z_line = gl.GLLinePlotItem(
+                pos=np.array([[0, 0, 0], [0, 0, axis_len]], dtype=np.float32),
+                color=(0.2, 0.2, 1.0, 1.0),
+                width=axis_width,
+                antialias=True,
+            )
+            self.glwidget.addItem(x_line)
+            self.glwidget.addItem(y_line)
+            self.glwidget.addItem(z_line)
+            self.axis = [x_line, y_line, z_line]
             self.axis_visible = True

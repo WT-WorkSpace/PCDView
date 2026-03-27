@@ -17,14 +17,15 @@ from PyQt5 import QtCore, QtGui
 from PyQt5.QtCore import QTimer, Qt
 from utils.qt_utils import draw_arrow, draw_bbox, draw_bbox_solid, draw_arc_arrow, draw_arc_arrow_missing
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
-from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog
-from PyQt5.QtWidgets import QLabel, QSizePolicy, QSlider, QMenuBar
+from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, QDialog, QFormLayout, QDialogButtonBox
+from PyQt5.QtWidgets import QLabel, QSizePolicy, QSlider, QMenuBar, QComboBox, QDoubleSpinBox
 from PyQt5.QtWidgets import QAction, QToolBar, QWidget, QPushButton, QColorDialog
 from PyQt5.QtWidgets import QSplitter, QFrame, QMessageBox, QShortcut, QDockWidget
 from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QAbstractItemView
-from PyQt5.QtWidgets import QHeaderView
+from PyQt5.QtWidgets import QHeaderView, QCheckBox
 from PyQt5.QtCore import QEvent, QSize
-from PyQt5.QtGui import QKeySequence, QPainter, QPen
+from PyQt5.QtGui import QKeySequence, QPainter, QPen, QCursor
+from matplotlib.path import Path as MplPath
 
 from utils.bbox_pick import (
     pick_bbox_index, points_in_screen_rect, fit_obb_xy,
@@ -38,45 +39,17 @@ from utils.load_bboxes_json import get_anno_from_tanway_json, save_bboxes_to_tan
 
 from utils.utils import load_json
 
-
-class BoxSelectOverlay(QWidget):
-    """框选时在 glwidget 上绘制拖拽矩形的透明覆盖层"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self._start = None
-        self._end = None
-
-    def set_rect(self, start, end):
-        self._start = start
-        self._end = end
-        self.update()
-
-    def clear_rect(self):
-        self._start = None
-        self._end = None
-        self.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self._start is None or self._end is None:
-            return
-        painter = QPainter(self)
-        painter.setPen(QPen(QColor(0, 120, 255), 2, Qt.SolidLine))
-        painter.setBrush(Qt.NoBrush)
-        x1, y1 = self._start
-        x2, y2 = self._end
-        x_min, x_max = min(x1, x2), max(x1, x2)
-        y_min, y_max = min(y1, y2), max(y1, y2)
-        painter.drawRect(int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
-        painter.end()
-
+# 将部分“独立类”拆分到单独文件中，避免 qtvis.py 过长
+from ui.box_select_overlay import BoxSelectOverlay
+from dialogs.plane_param_dialog import PlaneParamDialog
+from dialogs.mask_param_dialog import MaskParamDialog
+from features.point_rect_select_mixin import PointRectSelectMixin
+from features.plane_mixin import PlaneMixin
+from features.mask_mixin import MaskMixin
 
 LIST_POINT_SELECT_CAP = 8000  # 列表展示上限，避免一次框选过多点时界面卡死
 
-
-class PointCloudViewer(QMainWindow, PCDViewWidget):
+class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMixin, MaskMixin):
     def __init__(self):
         QMainWindow.__init__(self)
         PCDViewWidget.__init__(self)
@@ -89,7 +62,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
     def init_ui(self):
         self.curpath = os.path.dirname(os.path.abspath(__file__))
         self.setWindowTitle("Point Cloud Viewer")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 850, 600)
         self.menu_bar = QMenuBar(self)
         self.setMenuBar(self.menu_bar)
 
@@ -141,6 +114,37 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.points_rect_select_mode = False  # 点云框选：拖拽矩形，选中点标红并列表展示
         self._points_rect_select_mask = None  # 与当前点云等长的 bool 掩码，或 None
         self._point_select_dock = None
+
+        # 平面绘制：可切换的“添加平面”
+        self._plane_item = None  # GLGridItem 或 GLMeshItem
+        # 当前平面参数（用于“添加/取消平面”按钮和“修改平面参数”对话框）
+        self._plane_params = {
+            "plane_type": "网格",
+            "plane_length": 100.0,
+            "plane_width": 100.0,
+            "grid_spacing": 10.0,
+            "center": (0.0, 0.0, -1.7),
+            "color_rgb": (180, 180, 180),
+            "alpha": 100.0,
+        }
+        self._add_plane_action = None
+
+        # Mask 绘制
+        self._mask_items = []
+        self._mask_visible = False
+        self._mask_toggle_action = None
+        self._mask_params = {
+            "json_path": "",
+            "point_size": 8.0,
+            "line_width": 2.0,
+            # 点颜色默认红色
+            "point_color": (255, 0, 0),
+            # 线颜色默认墨绿色
+            "line_color": (0, 100, 0),
+            "point_z": 0.0,
+            "keep_inside_points": False,
+        }
+        self._mask_settings_action = None
 
         self.right_button_pressed = False
         self.last_mouse_pos = None
@@ -266,6 +270,23 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.cancel_points_rect_select_action.setCheckable(False)
         self.toolbar.addAction(self.cancel_points_rect_select_action)
 
+        # 红圈位置：添加/取消平面
+        self._add_plane_action = self.create_action(
+            "添加/取消平面",
+            "icons/wangge.svg",
+            self._toggle_add_plane,
+        )
+        self._add_plane_action.setCheckable(True)
+        self.toolbar.addAction(self._add_plane_action)
+
+        self._mask_toggle_action = self.create_action(
+            "显示/关闭Mask",
+            "icons/mask.svg",
+            self._toggle_mask_visibility,
+        )
+        self._mask_toggle_action.setCheckable(True)
+        self.toolbar.addAction(self._mask_toggle_action)
+
         self.color_sidebar = QToolBar("colors", self)
         self.addToolBar(Qt.RightToolBarArea, self.color_sidebar)
         self.color_sidebar.setVisible(False)  # Initially hidden
@@ -276,8 +297,8 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
 
     def create_file_menus(self):
         file_menu = self.menu_bar.addMenu("File")
-        self.open_file_action = self.create_action("Open File", 'icons/open.png', self.open_file)
-        self.open_dir_action = self.create_action("Open Directory", 'icons/open_dir.png', self.open_directory)
+        self.open_file_action = self.create_action("Open File", 'icons/open.svg', self.open_file)
+        self.open_dir_action = self.create_action("Open Directory", 'icons/open_dir.svg', self.open_directory)
         self.open_bboxes_dir_action = self.create_action("Open BBoxes Dir", 'icons/open_boxes_dir.svg',self.open_bboxes_directory)
         file_menu.addAction(self.open_file_action)
         file_menu.addAction(self.open_dir_action)
@@ -290,6 +311,13 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         self.decrease_pointsize_action = self.create_action("Point Size -", 'icons/pointsize_decrease.png', self.decrease_points_size)
         self.points_color = self.create_action("Color", 'icons/color.svg', self.select_color)
         self.coordinate = self.create_action("Coordinate", 'icons/coordinate.svg', self.create_coordinate)
+        # Tools 里提供平面参数修改
+        self._modify_plane_params_action = self.create_action(
+            "修改平面参数", "icons/add_bbox.svg", self._modify_plane_params
+        )
+        self._mask_settings_action = self.create_action(
+            "Mask设置", "icons/mask.svg", self._open_mask_settings
+        )
         self.save_view_action = self.create_action("Save View", 'icons/save_view.svg', self.save_view)
         self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
 
@@ -297,6 +325,8 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         tool_pointsize_menu.addAction(self.decrease_pointsize_action)
         tool_menu.addAction(self.points_color)
         tool_menu.addAction(self.coordinate)
+        tool_menu.addAction(self._modify_plane_params_action)
+        tool_menu.addAction(self._mask_settings_action)
         tool_menu.addAction(self.save_view_action)
         tool_menu.addAction(self.load_view_action)
 
@@ -531,313 +561,9 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
             self.box_select_overlay.clear_rect()
             self._update_frame_info_label()
 
-    def _toggle_points_rect_select_mode(self):
-        """点云框选：每次点击工具栏仅允许拖拽一次矩形；再次框选需重新点击。"""
-        self.points_rect_select_mode = not self.points_rect_select_mode
-        self.points_rect_select_action.setChecked(self.points_rect_select_mode)
-        if self.points_rect_select_mode:
-            # 开启下一轮框选：恢复之前高亮的异色，但不取消左侧弹框（只在取消框选时才隐藏）
-            self._restore_points_color_only()
-            self.box_select_mode = False
-            self.box_select_action.setChecked(False)
-            self.point_select_info_label.setText(
-                "已就绪：在主视图中按住左键拖拽一次矩形（仅一次机会）。再次框选请先再点工具栏「点云框选」。"
-            )
-            self.frame_info_label.setText("点云框选：请拖拽一次矩形（仅一次机会）")
-            self._update_points_rect_button_style(True)
-        else:
-            self.box_select_start = None
-            self.box_select_start_logical = None
-            self.box_select_overlay.clear_rect()
-            self._update_frame_info_label()
-            self._update_points_rect_button_style(False)
+    # PointRectSelectMixin has moved the point-rectangle selection UI logic here.
 
-    def _finish_points_rect_one_shot(self):
-        """一次拖拽结束后关闭点云框选模式，需再次点击工具栏才能框选。"""
-        self.points_rect_select_mode = False
-        if hasattr(self, "points_rect_select_action"):
-            self.points_rect_select_action.setChecked(False)
-        self._update_frame_info_label()
-        self._update_points_rect_button_style(False)
-
-    def _restore_points_after_rect_select(self):
-        """取消/开始新一轮框选前：去掉红色高亮并清空表格数据区。"""
-        if self._points_rect_select_mask is not None:
-            self._points_rect_select_mask = None
-            self.vis_fram(updata_color_bar=False)
-        self._reset_point_select_table_ui()
-
-    def _restore_points_color_only(self):
-        """仅恢复点云颜色（去掉红色高亮），不清空/隐藏左侧表格。"""
-        if self._points_rect_select_mask is not None:
-            self._points_rect_select_mask = None
-            self.vis_fram(updata_color_bar=False)
-
-    def _update_points_rect_button_style(self, active: bool):
-        """让“点云框选”按钮在生效期间呈现不同颜色。"""
-        try:
-            if not hasattr(self, "toolbar") or self.points_rect_select_action is None:
-                return
-            btn = self.toolbar.widgetForAction(self.points_rect_select_action)
-            if btn is None:
-                return
-            if active:
-                btn.setStyleSheet(
-                    "QToolButton { background-color: #2196F3; color: white; border-radius: 6px; padding: 6px 10px; }"
-                )
-            else:
-                btn.setStyleSheet("QToolButton { background-color: transparent; border-radius: 6px; padding: 6px 10px; }")
-        except Exception:
-            # 样式更新失败不影响功能
-            pass
-
-    def _ensure_point_select_dock(self):
-        if self._point_select_dock is not None:
-            return
-        dock = QDockWidget("框选点云", self)
-        dock.setObjectName("PointRectSelectDock")
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        self.point_select_info_label = QLabel(
-            "点击「点云框选」后，在主视图拖拽一次矩形；选中点为红色，下方表格查看各点字段。"
-        )
-        self.point_select_info_label.setWordWrap(True)
-        lay.addWidget(self.point_select_info_label)
-        self.point_select_table = QTableWidget()
-        self.point_select_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.point_select_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.point_select_table.setAlternatingRowColors(True)
-        self.point_select_table.horizontalHeader().setStretchLastSection(True)
-        self.point_select_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        # 允许用户点击表头对列排序（Qt 会在每次点击时在升/降之间切换）
-        self.point_select_table.setSortingEnabled(True)
-        lay.addWidget(self.point_select_table, 1)
-        dock.setWidget(w)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        self._point_select_dock = dock
-
-    def _reset_point_select_table_ui(self):
-        if self._point_select_dock is None:
-            return
-        self.point_select_table.clearContents()
-        self.point_select_table.setRowCount(0)
-        self.point_select_table.setColumnCount(0)
-        self.point_select_table.setHorizontalHeaderLabels([])
-
-    @staticmethod
-    def _colors_to_rgba_n4(colors, n):
-        """将当前 self.colors（纯色元组或 per-point ndarray）规范为 (N,4) float32 RGBA。"""
-        if n <= 0:
-            return np.zeros((0, 4), dtype=np.float32)
-        if isinstance(colors, tuple):
-            r, g, b = float(colors[0]), float(colors[1]), float(colors[2])
-            a = float(colors[3]) if len(colors) > 3 else 1.0
-            out = np.empty((n, 4), dtype=np.float32)
-            out[:, 0] = r
-            out[:, 1] = g
-            out[:, 2] = b
-            out[:, 3] = a
-            return out
-        arr = np.asarray(colors, dtype=np.float64)
-        if arr.ndim == 2 and arr.shape[0] == n:
-            if arr.shape[1] == 4:
-                return arr.astype(np.float32)
-            if arr.shape[1] == 3:
-                out = np.zeros((n, 4), dtype=np.float32)
-                out[:, :3] = arr.astype(np.float32)
-                out[:, 3] = 1.0
-                return out
-        if arr.size == 4:
-            return np.tile(arr.astype(np.float32).reshape(1, 4), (n, 1))
-        return np.ones((n, 4), dtype=np.float32) * 0.7
-
-    def _point_select_column_names(self):
-        """表格列名：PCD 字段名；无元数据时用 x,y,z,4,5,6,...（不含点索引列）。"""
-        if getattr(self, "structured_points", None) is not None and len(self.structured_points) > 0:
-            cols = []
-            for name in self.structured_points.dtype.names or ():
-                if name is None or str(name).startswith("_"):
-                    continue
-                cols.append(str(name))
-            return cols
-        if self.raw_points is None or len(self.raw_points) == 0:
-            return []
-        n = int(self.raw_points.shape[1])
-        meta = getattr(self, "metadata", None) or []
-        usable = [str(m) for m in meta if m and m != "_"]
-        if len(usable) == n:
-            return usable
-        base = ["x", "y", "z"]
-        if n <= 3:
-            return base[:n]
-        return base + [str(k) for k in range(4, n + 1)]
-
-    def _point_cell_value(self, idx, col_name):
-        if getattr(self, "structured_points", None) is not None and idx < len(self.structured_points):
-            names = self.structured_points.dtype.names or ()
-            if col_name not in names:
-                return ""
-            row = self.structured_points[int(idx)]
-            try:
-                v = row[col_name]
-                if isinstance(v, (bytes, np.bytes_)):
-                    return v.decode("utf-8", errors="replace")
-                if isinstance(v, np.floating) or isinstance(v, float):
-                    return "{:.6g}".format(float(v))
-                if isinstance(v, (np.integer, int)):
-                    return str(int(v))
-                return str(v)
-            except (TypeError, ValueError):
-                return str(row[col_name])
-        if self.raw_points is not None and idx < len(self.raw_points):
-            row = self.raw_points[idx]
-            meta = list(getattr(self, "metadata", None) or [])
-            usable = [str(m) for m in meta if m and m != "_"]
-            n = len(row)
-            if len(usable) == n:
-                try:
-                    j = usable.index(col_name)
-                    return "{:.6g}".format(float(self.raw_points[idx, j]))
-                except ValueError:
-                    pass
-            if col_name == "x" and n >= 1:
-                return "{:.6g}".format(float(row[0]))
-            if col_name == "y" and n >= 2:
-                return "{:.6g}".format(float(row[1]))
-            if col_name == "z" and n >= 3:
-                return "{:.6g}".format(float(row[2]))
-            if col_name.isdigit():
-                j = int(col_name) - 1
-                if 0 <= j < n:
-                    return "{:.6g}".format(float(row[j]))
-        return ""
-
-    def _point_cell_sort_value(self, idx, col_name):
-        """单元格排序值：写入 QTableWidgetItem 的 EditRole，保证数值按数值排序。"""
-        # structured_points：优先用字段值
-        if getattr(self, "structured_points", None) is not None and idx < len(self.structured_points):
-            names = self.structured_points.dtype.names or ()
-            if col_name in names:
-                row = self.structured_points[int(idx)]
-                try:
-                    v = row[col_name]
-                    if isinstance(v, (bytes, np.bytes_)):
-                        return v.decode("utf-8", errors="replace")
-                    if isinstance(v, (np.floating, float)):
-                        return float(v)
-                    if isinstance(v, (np.integer, int)):
-                        return int(v)
-                    return str(v)
-                except Exception:
-                    return None
-
-        # raw_points：兜底（x/y/z 或数字列名）
-        if getattr(self, "raw_points", None) is not None and idx < len(self.raw_points):
-            row = self.raw_points[int(idx)]
-            n = int(self.raw_points.shape[1])
-            if col_name == "x" and n >= 1:
-                return float(row[0])
-            if col_name == "y" and n >= 2:
-                return float(row[1])
-            if col_name == "z" and n >= 3:
-                return float(row[2])
-            if str(col_name).isdigit():
-                j = int(col_name) - 1
-                if 0 <= j < n:
-                    return float(row[j])
-
-            # 可能是 metadata 名字：尝试按 metadata 对齐（用于排序）
-            meta = list(getattr(self, "metadata", None) or [])
-            usable = [str(m) for m in meta if m and m != "_"]
-            if col_name in usable:
-                j = usable.index(col_name)
-                if 0 <= j < n:
-                    try:
-                        return float(row[j])
-                    except Exception:
-                        return None
-        return None
-
-    def _fill_point_select_table(self, mask):
-        self._ensure_point_select_dock()
-        cols = self._point_select_column_names()
-        indices = np.flatnonzero(np.asarray(mask, dtype=bool))
-        total = int(len(indices))
-        self.point_select_table.clearContents()
-        self.point_select_table.setColumnCount(len(cols))
-        self.point_select_table.setHorizontalHeaderLabels(cols)
-        if total == 0:
-            self.point_select_table.setRowCount(0)
-            self.point_select_info_label.setText("框选区域内无点。")
-            return
-        shown = min(total, LIST_POINT_SELECT_CAP)
-        self.point_select_info_label.setText(
-            "已选中 {} 个点（表格显示 {} 行{}）。".format(
-                total,
-                shown,
-                "，其余行省略" if total > LIST_POINT_SELECT_CAP else "",
-            )
-        )
-        self.point_select_table.setRowCount(shown)
-        for r in range(shown):
-            idx = int(indices[r])
-            for c, col_name in enumerate(cols):
-                text = self._point_cell_value(idx, col_name)
-                item = QTableWidgetItem(text)
-                sort_val = self._point_cell_sort_value(idx, col_name)
-                if sort_val is None:
-                    item.setData(Qt.EditRole, text)
-                else:
-                    item.setData(Qt.EditRole, sort_val)
-                self.point_select_table.setItem(r, c, item)
-        if total > LIST_POINT_SELECT_CAP:
-            self.point_select_info_label.setText(
-                self.point_select_info_label.text()
-                + " … 另有 {} 点未列出（可缩小框选范围）。".format(total - LIST_POINT_SELECT_CAP)
-            )
-
-    def _apply_points_in_rect_from_drag(self, x1, y1, x2, y2):
-        x_min, x_max = min(x1, x2), max(x1, x2)
-        y_min, y_max = min(y1, y2), max(y1, y2)
-        if not hasattr(self, "raw_points") or self.raw_points is None or len(self.raw_points) < 1:
-            self.frame_info_label.setText("无点云可框选")
-            return
-        pts_xyz = np.asarray(self.raw_points[:, :3], dtype=np.float64)
-        mask = points_in_screen_rect(self.glwidget, pts_xyz, x_min, x_max, y_min, y_max)
-        self._ensure_point_select_dock()
-        # 拖拽完成后再弹出表格（点击框选按钮时不弹出）
-        if self._point_select_dock is not None:
-            self._point_select_dock.show()
-            self._point_select_dock.raise_()
-        if not np.any(mask):
-            self._points_rect_select_mask = None
-            self._fill_point_select_table(mask)
-            self.frame_info_label.setText("框选区域内无点")
-            self.vis_fram(updata_color_bar=False)
-            return
-        self._points_rect_select_mask = mask
-        self._fill_point_select_table(mask)
-        self.frame_info_label.setText("已框选 {} 个点".format(int(np.count_nonzero(mask))))
-        self.vis_fram(updata_color_bar=False)
-
-    def _clear_point_rect_selection(self):
-        """取消框选：恢复点云颜色并清空表格。"""
-        # 从工具栏取消框选时，必须保证按钮状态与高亮状态一致
-        self.points_rect_select_mode = False
-        if hasattr(self, "points_rect_select_action"):
-            self.points_rect_select_action.setChecked(False)
-        self.box_select_start = None
-        self.box_select_start_logical = None
-        self.box_select_overlay.clear_rect()
-        self._restore_points_after_rect_select()
-        if self._point_select_dock is not None:
-            # “去掉表格” - 直接隐藏整个 dock（含表格）
-            self.point_select_info_label.setText(
-                "点击「点云框选」后，在主视图拖拽一次矩形；选中点为红色，下方表格查看各点字段。"
-            )
-            self._point_select_dock.hide()
-        self._update_frame_info_label()
-        self._update_points_rect_button_style(False)
+    # Plane/Mask 功能已迁移到 PlaneMixin/MaskMixin（features/*_mixin.py）
 
     def _add_bbox_from_rect(self, x1, y1, x2, y2):
         """根据屏幕矩形框选的点，拟合 roll=0 pitch=0 的贴合包围框；无点时投影到地面生成框"""
@@ -1202,6 +928,11 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
             self.vis_fram()
 
     def vis_fram(self, updata_color_bar=False):
+        # 兜底：程序启动时可能只是用文字点云初始化（此时 structured_points 可能不存在）
+        if not hasattr(self, "structured_points"):
+            self.structured_points = None
+        if not hasattr(self, "metadata"):
+            self.metadata = None
         for item in self.current_bbox_items:
             self.glwidget.removeItem(item)
         for item in getattr(self, "current_link_arrows", []):
@@ -1323,13 +1054,33 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
             else:
                 self.bbox_three_views_panel.hide()
 
-        if self.scatter:
-            self.glwidget.removeItem(self.scatter)
+        # GLViewWidget.removeItem 在 item 不存在于其 internal list 时会抛 ValueError，
+        # 例如 Mask 设置界面实时回调过程中 vis_fram 被多次触发。
+        if self.scatter is not None:
+            try:
+                items = getattr(self.glwidget, "items", None)
+                if items is not None:
+                    if self.scatter in items:
+                        self.glwidget.removeItem(self.scatter)
+                else:
+                    # 兜底：尝试移除
+                    self.glwidget.removeItem(self.scatter)
+            except ValueError:
+                # 已不在列表中，忽略即可
+                pass
 
         self.points = self.raw_points[:, :3]
+        keep_inside_mask = self._mask_keep_inside_points(self.points)
+        if len(keep_inside_mask) == len(self.points):
+            self.points = self.points[keep_inside_mask]
+
+        structured_for_display = getattr(self, "structured_points", None)
+        if structured_for_display is not None and len(keep_inside_mask) == len(structured_for_display):
+            structured_for_display = structured_for_display[keep_inside_mask]
+
         if self.color_fields is not None:
-            if max(self.structured_points[self.color_fields]) >= 0:
-                unique_values = np.unique(self.structured_points[self.color_fields])
+            if len(structured_for_display) > 0 and max(structured_for_display[self.color_fields]) >= 0:
+                unique_values = np.unique(structured_for_display[self.color_fields])
                 num_unique_values = len(unique_values)
                 print(unique_values)
                 print(type(unique_values[0]))
@@ -1337,15 +1088,18 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
                     color_map = {}
                     for i, value in enumerate(unique_values):
                         color_map[value] =self.colors_16[value]
-                    self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
+                    self.colors = np.array([color_map[val] for val in structured_for_display[self.color_fields]])
 
                 elif num_unique_values <= 16:
                     color_map = {}
                     for i, value in enumerate(unique_values):
                         color_map[value] =self.colors_16[i]
-                    self.colors = np.array([color_map[val] for val in self.structured_points[self.color_fields]])
+                    self.colors = np.array([color_map[val] for val in structured_for_display[self.color_fields]])
                 else:
-                    self.colors = self.Colors[0](self.min_max_normalization(self.structured_points[self.color_fields]))
+                    self.colors = self.Colors[0](self.min_max_normalization(structured_for_display[self.color_fields]))
+            else:
+                # 过滤后无点时兜底颜色，避免沿用上一帧颜色长度不匹配
+                self.colors = getattr(self, "_user_solid_rgbf", QColor(0, 0, 255).getRgbF())
         else:
             # 未按字段映射颜色时：必须从「基底」重建，不可沿用上一帧（可能已把框选红色写入 self.colors）
             rgbf = getattr(self, "_user_solid_rgbf", None)
@@ -1357,11 +1111,19 @@ class PointCloudViewer(QMainWindow, PCDViewWidget):
         rgba = self._colors_to_rgba_n4(self.colors, len(self.points))
         m = getattr(self, "_points_rect_select_mask", None)
         if m is not None:
-            if len(m) != len(self.points):
-                self._points_rect_select_mask = None
-            elif np.any(m):
+            # 若开启“仅保留圈内点”，self.points 会被 keep_inside_mask 过滤，
+            # 此时框选 mask 仍基于 raw_points 全量长度，需要同步过滤后再应用颜色高亮。
+            m_use = None
+            if len(m) == len(self.points):
+                m_use = m
+            elif "keep_inside_mask" in locals() and len(m) == len(keep_inside_mask):
+                m_use = np.asarray(m, dtype=bool)[keep_inside_mask]
+            else:
+                m_use = None
+
+            if m_use is not None and np.any(m_use):
                 rgba = rgba.copy()
-                rgba[np.asarray(m, dtype=bool)] = (1.0, 0.0, 0.0, 1.0)
+                rgba[np.asarray(m_use, dtype=bool)] = (1.0, 0.0, 0.0, 1.0)
         self.scatter = GLScatterPlotItem(pos=self.points, color=rgba, size=self.point_size)
         self.colors = rgba
         self.glwidget.addItem(self.scatter)

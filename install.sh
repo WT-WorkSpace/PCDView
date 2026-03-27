@@ -4,9 +4,11 @@
   --add-data "icons/coordinate.svg:icons"\
   --add-data "icons/fengguangming.ttf:icons"\
   --add-data "icons/next.png:icons"\
-  --add-data "icons/open.png:icons"\
-  --add-data "icons/open_dir.png:icons"\
-  --add-data "icons/open_folder.svg:icons"\
+  --add-data "icons/open.svg:icons"\
+  --add-data "icons/open_dir.svg:icons"\
+  --add-data "icons/box_selection.svg:icons"\
+  --add-data "icons/cancel_box_selection.svg:icons"\
+  --add-data "icons/mask.svg:icons"\
   --add-data "icons/pause_pcd.png:icons"\
   --add-data "icons/play_pcd.png:icons"\
   --add-data "icons/pointsize.png:icons"\
@@ -16,6 +18,8 @@
   --add-data "icons/load_view.svg:icons"\
   --add-data "icons/save_view.svg:icons"\
   --add-data "icons/open_boxes_dir.svg:icons"\
+  --add-data "icons/wangge.svg:icons"\
+  --add-data "icons/add_bbox.svg:icons"\
   qtvis.py
 
 rm ~/Desktop/qtvis
