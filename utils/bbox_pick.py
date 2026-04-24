@@ -135,15 +135,26 @@ def fit_obb_xy(points_xy, roll=0, pitch=0):
         idx = np.argsort(eigenvals)[::-1]
         main_dir = eigenvecs[:, idx[0]]
         yaw = np.arctan2(main_dir[1], main_dir[0])
+        # 先按 PCA 方向旋转到局部坐标，再用 min/max 求尺寸和“真实中心”。
+        # 注意：不能直接用均值中心 + ptp；当点集在局部坐标中不对称时会漏边缘点。
         cos_yaw = np.cos(-yaw)
         sin_yaw = np.sin(-yaw)
         local_x = cos_yaw * centered[:, 0] - sin_yaw * centered[:, 1]
         local_y = sin_yaw * centered[:, 0] + cos_yaw * centered[:, 1]
-        l = float(np.ptp(local_x))
-        w = float(np.ptp(local_y))
+        x_min, x_max = float(np.min(local_x)), float(np.max(local_x))
+        y_min, y_max = float(np.min(local_y)), float(np.max(local_y))
+        l = x_max - x_min
+        w = y_max - y_min
         l = max(l, 0.1)
         w = max(w, 0.1)
-        return center[0], center[1], l, w, yaw
+        # 局部框中心回到世界坐标
+        cx_local = 0.5 * (x_min + x_max)
+        cy_local = 0.5 * (y_min + y_max)
+        cos_inv = np.cos(yaw)
+        sin_inv = np.sin(yaw)
+        cx_world = center[0] + (cos_inv * cx_local - sin_inv * cy_local)
+        cy_world = center[1] + (sin_inv * cx_local + cos_inv * cy_local)
+        return cx_world, cy_world, l, w, yaw
     except Exception:
         l = float(np.ptp(pts[:, 0]))
         w = float(np.ptp(pts[:, 1]))

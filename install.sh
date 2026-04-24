@@ -20,6 +20,7 @@ set -eu
   --add-data "icons/pointsize_decrease.png:icons" \
   --add-data "icons/pointsize_increase.png:icons" \
   --add-data "icons/prev_pcd.png:icons" \
+  --add-data "icons/cluster.svg:icons" \
   --add-data "icons/load_view.svg:icons" \
   --add-data "icons/save_view.svg:icons" \
   --add-data "icons/open_boxes_dir.svg:icons" \

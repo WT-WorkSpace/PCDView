@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import QLabel, QSizePolicy, QSlider, QMenuBar, QComboBox, Q
 from PyQt5.QtWidgets import QAction, QToolBar, QWidget, QPushButton, QColorDialog
 from PyQt5.QtWidgets import QSplitter, QFrame, QMessageBox, QShortcut, QDockWidget
 from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QAbstractItemView
-from PyQt5.QtWidgets import QHeaderView, QCheckBox
+from PyQt5.QtWidgets import QHeaderView, QCheckBox, QSpinBox, QGroupBox, QGridLayout
 from PyQt5.QtCore import QEvent, QSize
 from PyQt5.QtGui import QKeySequence, QPainter, QPen, QCursor
 from matplotlib.path import Path as MplPath
@@ -46,6 +46,7 @@ from dialogs.mask_param_dialog import MaskParamDialog
 from features.point_rect_select_mixin import PointRectSelectMixin
 from features.plane_mixin import PlaneMixin
 from features.mask_mixin import MaskMixin
+from features.obstacle_cluster import ObstacleCluster
 
 LIST_POINT_SELECT_CAP = 8000  # 列表展示上限，避免一次框选过多点时界面卡死
 
@@ -145,6 +146,33 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
             "keep_inside_points": False,
         }
         self._mask_settings_action = None
+        self._cluster_bbox_items = []
+        self._cluster_bbox_infos = []
+        self._selected_cluster_bbox_index = None
+        self._cluster_select_mask = None  # 基于 raw_points 长度的 bool 掩码，标记被点击聚类框内的点
+        self._cluster_enabled = False
+        self._obstacle_cluster = ObstacleCluster()
+        self._cluster_params = {
+            "eps": 0.5,
+            "min_points": 5,
+            "max_points": 200000,
+            "voxel_size": 0.1,
+            "use_lshape": False,
+            "use_roi": True,
+            "roi_x_min": -100.0,
+            "roi_x_max": 100.0,
+            "roi_y_min": -100.0,
+            "roi_y_max": 100.0,
+            "roi_z_min": -1.5,
+            "roi_z_max": 3.0,
+            "use_size_filter": False,
+            "l_min": 0.0,
+            "l_max": 1000.0,
+            "w_min": 0.0,
+            "w_max": 1000.0,
+            "h_min": 0.0,
+            "h_max": 1000.0,
+        }
 
         self.right_button_pressed = False
         self.last_mouse_pos = None
@@ -286,6 +314,13 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         )
         self._mask_toggle_action.setCheckable(True)
         self.toolbar.addAction(self._mask_toggle_action)
+        self._cluster_action = self.create_action(
+            "点云聚类",
+            "icons/cluster.svg",
+            self._toggle_cluster_from_toolbar,
+        )
+        self._cluster_action.setCheckable(True)
+        self.toolbar.addAction(self._cluster_action)
 
         self.color_sidebar = QToolBar("colors", self)
         self.addToolBar(Qt.RightToolBarArea, self.color_sidebar)
@@ -318,6 +353,9 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         self._mask_settings_action = self.create_action(
             "Mask设置", "icons/mask.svg", self._open_mask_settings
         )
+        self._cluster_params_action = self.create_action(
+            "当前帧点云聚类", "icons/cluster.svg", self._open_cluster_dialog
+        )
         self.save_view_action = self.create_action("Save View", 'icons/save_view.svg', self.save_view)
         self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
 
@@ -327,6 +365,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         tool_menu.addAction(self.coordinate)
         tool_menu.addAction(self._modify_plane_params_action)
         tool_menu.addAction(self._mask_settings_action)
+        tool_menu.addAction(self._cluster_params_action)
         tool_menu.addAction(self.save_view_action)
         tool_menu.addAction(self.load_view_action)
 
@@ -403,6 +442,16 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
                 return True
             return super().eventFilter(obj, event)
 
+        if event.type() == QEvent.MouseButtonRelease and self._cluster_bbox_infos:
+            try:
+                cidx = pick_bbox_index(self.glwidget, mx, my, self._cluster_bbox_infos)
+                if cidx is not None and event.button() in (Qt.LeftButton, Qt.RightButton):
+                    self._selected_cluster_bbox_index = int(cidx)
+                    self._update_cluster_select_mask_from_selected()
+                    self.vis_fram()
+                    return True
+            except Exception as e:
+                print("cluster bbox pick error:", e)
         if event.type() == QEvent.MouseButtonRelease and self.current_bbox_infos:
             try:
                 idx = pick_bbox_index(self.glwidget, mx, my, self.current_bbox_infos)
@@ -943,6 +992,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         self.selected_bbox_index = None
         self.bbox_modified = False
         self.save_bboxes_btn.hide()
+        self._clear_cluster_bboxes()
         if self.bboxes_directory is not None:
             self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem)+".json")
             self.original_json_agents = None
@@ -1124,11 +1174,344 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
             if m_use is not None and np.any(m_use):
                 rgba = rgba.copy()
                 rgba[np.asarray(m_use, dtype=bool)] = (1.0, 0.0, 0.0, 1.0)
+        cm = getattr(self, "_cluster_select_mask", None)
+        if cm is not None:
+            cm_use = None
+            if len(cm) == len(self.points):
+                cm_use = cm
+            elif "keep_inside_mask" in locals() and len(cm) == len(keep_inside_mask):
+                cm_use = np.asarray(cm, dtype=bool)[keep_inside_mask]
+            else:
+                cm_use = None
+            if cm_use is not None and np.any(cm_use):
+                if not isinstance(rgba, np.ndarray):
+                    rgba = self._colors_to_rgba_n4(rgba, len(self.points))
+                rgba = np.asarray(rgba, dtype=np.float32).copy()
+                rgba[np.asarray(cm_use, dtype=bool)] = (0.2, 1.0, 0.2, 1.0)
         self.scatter = GLScatterPlotItem(pos=self.points, color=rgba, size=self.point_size)
         self.colors = rgba
         self.glwidget.addItem(self.scatter)
         if updata_color_bar:
             self.update_color_sidebar()
+        self._refresh_cluster_if_enabled()
+
+    def _open_cluster_dialog(self):
+        """打开当前帧点云聚类参数窗口。"""
+        if not hasattr(self, "raw_points") or self.raw_points is None or len(self.raw_points) == 0:
+            QMessageBox.information(self, "点云聚类", "当前没有可聚类的点云。")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("当前帧点云聚类参数")
+        dlg.setMinimumWidth(520)
+        form = QFormLayout(dlg)
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        params = getattr(self, "_cluster_params", {})
+
+        use_lshape_check = QCheckBox("启用L-shape拟合", dlg)
+        use_lshape_check.setChecked(bool(params.get("use_lshape", False)))
+        use_roi_check = QCheckBox("启用 ROI 过滤", dlg)
+        use_roi_check.setChecked(bool(params.get("use_roi", True)))
+        use_size_filter_check = QCheckBox("启用框尺寸筛选(l/w/h)", dlg)
+        use_size_filter_check.setChecked(bool(params.get("use_size_filter", False)))
+
+        eps_spin = QDoubleSpinBox(dlg)
+        eps_spin.setRange(0.01, 20.0)
+        eps_spin.setDecimals(2)
+        eps_spin.setSingleStep(0.05)
+        eps_spin.setValue(float(params.get("eps", 0.5)))
+
+        min_points_spin = QSpinBox(dlg)
+        min_points_spin.setRange(3, 100000)
+        min_points_spin.setSingleStep(10)
+        min_points_spin.setValue(int(params.get("min_points", 5)))
+
+        max_points_spin = QSpinBox(dlg)
+        max_points_spin.setRange(10, 2000000)
+        max_points_spin.setSingleStep(1000)
+        max_points_spin.setValue(int(params.get("max_points", 200000)))
+        voxel_size_spin = QDoubleSpinBox(dlg)
+        voxel_size_spin.setRange(0.0, 5.0)
+        voxel_size_spin.setDecimals(2)
+        voxel_size_spin.setSingleStep(0.05)
+        voxel_size_spin.setValue(float(params.get("voxel_size", 0.1)))
+
+        roi_x_min_spin = QDoubleSpinBox(dlg)
+        roi_x_min_spin.setRange(-100000.0, 100000.0)
+        roi_x_min_spin.setDecimals(2)
+        roi_x_min_spin.setSingleStep(0.5)
+        roi_x_min_spin.setValue(float(params.get("roi_x_min", -100.0)))
+
+        roi_x_max_spin = QDoubleSpinBox(dlg)
+        roi_x_max_spin.setRange(-100000.0, 100000.0)
+        roi_x_max_spin.setDecimals(2)
+        roi_x_max_spin.setSingleStep(0.5)
+        roi_x_max_spin.setValue(float(params.get("roi_x_max", 100.0)))
+
+        roi_y_min_spin = QDoubleSpinBox(dlg)
+        roi_y_min_spin.setRange(-100000.0, 100000.0)
+        roi_y_min_spin.setDecimals(2)
+        roi_y_min_spin.setSingleStep(0.5)
+        roi_y_min_spin.setValue(float(params.get("roi_y_min", -100.0)))
+
+        roi_y_max_spin = QDoubleSpinBox(dlg)
+        roi_y_max_spin.setRange(-100000.0, 100000.0)
+        roi_y_max_spin.setDecimals(2)
+        roi_y_max_spin.setSingleStep(0.5)
+        roi_y_max_spin.setValue(float(params.get("roi_y_max", 100.0)))
+
+        roi_z_min_spin = QDoubleSpinBox(dlg)
+        roi_z_min_spin.setRange(-100000.0, 100000.0)
+        roi_z_min_spin.setDecimals(2)
+        roi_z_min_spin.setSingleStep(0.2)
+        roi_z_min_spin.setValue(float(params.get("roi_z_min", -1.5)))
+
+        roi_z_max_spin = QDoubleSpinBox(dlg)
+        roi_z_max_spin.setRange(-100000.0, 100000.0)
+        roi_z_max_spin.setDecimals(2)
+        roi_z_max_spin.setSingleStep(0.2)
+        roi_z_max_spin.setValue(float(params.get("roi_z_max", 3.0)))
+
+        l_min_spin = QDoubleSpinBox(dlg)
+        l_min_spin.setRange(0.0, 10000.0)
+        l_min_spin.setDecimals(2)
+        l_min_spin.setSingleStep(0.1)
+        l_min_spin.setValue(float(params.get("l_min", 0.0)))
+        l_max_spin = QDoubleSpinBox(dlg)
+        l_max_spin.setRange(0.0, 10000.0)
+        l_max_spin.setDecimals(2)
+        l_max_spin.setSingleStep(0.1)
+        l_max_spin.setValue(float(params.get("l_max", 1000.0)))
+        w_min_spin = QDoubleSpinBox(dlg)
+        w_min_spin.setRange(0.0, 10000.0)
+        w_min_spin.setDecimals(2)
+        w_min_spin.setSingleStep(0.1)
+        w_min_spin.setValue(float(params.get("w_min", 0.0)))
+        w_max_spin = QDoubleSpinBox(dlg)
+        w_max_spin.setRange(0.0, 10000.0)
+        w_max_spin.setDecimals(2)
+        w_max_spin.setSingleStep(0.1)
+        w_max_spin.setValue(float(params.get("w_max", 1000.0)))
+        h_min_spin = QDoubleSpinBox(dlg)
+        h_min_spin.setRange(0.0, 10000.0)
+        h_min_spin.setDecimals(2)
+        h_min_spin.setSingleStep(0.1)
+        h_min_spin.setValue(float(params.get("h_min", 0.0)))
+        h_max_spin = QDoubleSpinBox(dlg)
+        h_max_spin.setRange(0.0, 10000.0)
+        h_max_spin.setDecimals(2)
+        h_max_spin.setSingleStep(0.1)
+        h_max_spin.setValue(float(params.get("h_max", 1000.0)))
+
+        basic_group = QGroupBox("聚类设置", dlg)
+        basic_grid = QGridLayout(basic_group)
+        basic_grid.addWidget(use_lshape_check, 0, 0, 1, 2)
+        basic_grid.addWidget(QLabel("聚类半径 eps", dlg), 1, 0)
+        basic_grid.addWidget(eps_spin, 1, 1)
+        basic_grid.addWidget(QLabel("最小聚类点数", dlg), 2, 0)
+        basic_grid.addWidget(min_points_spin, 2, 1)
+        basic_grid.addWidget(QLabel("最大参与点数", dlg), 3, 0)
+        basic_grid.addWidget(max_points_spin, 3, 1)
+        basic_grid.addWidget(QLabel("体素下采样大小", dlg), 4, 0)
+        basic_grid.addWidget(voxel_size_spin, 4, 1)
+        basic_grid.setColumnStretch(0, 2)
+        basic_grid.setColumnStretch(1, 3)
+
+        roi_group = QGroupBox("ROI 设置", dlg)
+        roi_grid = QGridLayout(roi_group)
+        roi_grid.addWidget(use_roi_check, 0, 0, 1, 4)
+        roi_grid.addWidget(QLabel("X最小", dlg), 1, 0)
+        roi_grid.addWidget(roi_x_min_spin, 1, 1)
+        roi_grid.addWidget(QLabel("X最大", dlg), 1, 2)
+        roi_grid.addWidget(roi_x_max_spin, 1, 3)
+        roi_grid.addWidget(QLabel("Y最小", dlg), 2, 0)
+        roi_grid.addWidget(roi_y_min_spin, 2, 1)
+        roi_grid.addWidget(QLabel("Y最大", dlg), 2, 2)
+        roi_grid.addWidget(roi_y_max_spin, 2, 3)
+        roi_grid.addWidget(QLabel("Z最小", dlg), 3, 0)
+        roi_grid.addWidget(roi_z_min_spin, 3, 1)
+        roi_grid.addWidget(QLabel("Z最大", dlg), 3, 2)
+        roi_grid.addWidget(roi_z_max_spin, 3, 3)
+
+        size_group = QGroupBox("框尺寸筛选", dlg)
+        size_grid = QGridLayout(size_group)
+        size_grid.addWidget(use_size_filter_check, 0, 0, 1, 4)
+        size_grid.addWidget(QLabel("L最小", dlg), 1, 0)
+        size_grid.addWidget(l_min_spin, 1, 1)
+        size_grid.addWidget(QLabel("L最大", dlg), 1, 2)
+        size_grid.addWidget(l_max_spin, 1, 3)
+        size_grid.addWidget(QLabel("W最小", dlg), 2, 0)
+        size_grid.addWidget(w_min_spin, 2, 1)
+        size_grid.addWidget(QLabel("W最大", dlg), 2, 2)
+        size_grid.addWidget(w_max_spin, 2, 3)
+        size_grid.addWidget(QLabel("H最小", dlg), 3, 0)
+        size_grid.addWidget(h_min_spin, 3, 1)
+        size_grid.addWidget(QLabel("H最大", dlg), 3, 2)
+        size_grid.addWidget(h_max_spin, 3, 3)
+
+        form.addRow(basic_group)
+        form.addRow(roi_group)
+        form.addRow(size_group)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dlg)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        form.addRow(btns)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        # 记住上次参数，下次打开沿用
+        self._cluster_params = {
+            "eps": float(eps_spin.value()),
+            "min_points": int(min_points_spin.value()),
+            "max_points": int(max_points_spin.value()),
+            "voxel_size": float(voxel_size_spin.value()),
+            "use_lshape": bool(use_lshape_check.isChecked()),
+            "use_roi": bool(use_roi_check.isChecked()),
+            "roi_x_min": float(roi_x_min_spin.value()),
+            "roi_x_max": float(roi_x_max_spin.value()),
+            "roi_y_min": float(roi_y_min_spin.value()),
+            "roi_y_max": float(roi_y_max_spin.value()),
+            "roi_z_min": float(roi_z_min_spin.value()),
+            "roi_z_max": float(roi_z_max_spin.value()),
+            "use_size_filter": bool(use_size_filter_check.isChecked()),
+            "l_min": float(l_min_spin.value()),
+            "l_max": float(l_max_spin.value()),
+            "w_min": float(w_min_spin.value()),
+            "w_max": float(w_max_spin.value()),
+            "h_min": float(h_min_spin.value()),
+            "h_max": float(h_max_spin.value()),
+        }
+        self._cluster_enabled = True
+
+        self._cluster_current_frame()
+        if hasattr(self, "_cluster_action"):
+            self._cluster_action.setChecked(True)
+
+    def _disable_cluster(self):
+        """关闭聚类效果并清理聚类框/高亮。"""
+        self._cluster_enabled = False
+        self._selected_cluster_bbox_index = None
+        self._cluster_select_mask = None
+        self._clear_cluster_bboxes()
+        self.vis_fram()
+        self.frame_info_label.setText("已关闭点云聚类")
+
+    def _toggle_cluster_from_toolbar(self):
+        """工具栏聚类按钮：单击启用聚类，再次单击关闭聚类。"""
+        if not hasattr(self, "_cluster_action"):
+            return
+        checked = self._cluster_action.isChecked()
+        if checked:
+            # 打开参数框并执行聚类；若取消则回滚按钮状态
+            prev_enabled = self._cluster_enabled
+            self._open_cluster_dialog()
+            if not self._cluster_enabled:
+                self._cluster_action.setChecked(prev_enabled)
+        else:
+            self._disable_cluster()
+
+    def _clear_cluster_bboxes(self):
+        """清理聚类绘制的包围框。"""
+        for item in getattr(self, "_cluster_bbox_items", []):
+            try:
+                self.glwidget.removeItem(item)
+            except ValueError:
+                pass
+        self._cluster_bbox_items = []
+        self._cluster_bbox_infos = []
+
+    def _cluster_current_frame(self):
+        """对当前帧点云做 DBSCAN 聚类并绘制 bbox(x,y,z,l,w,h,yaw)。"""
+        if not hasattr(self, "raw_points") or self.raw_points is None or len(self.raw_points) == 0:
+            self.frame_info_label.setText("当前帧点云为空")
+            return
+        params = dict(getattr(self, "_cluster_params", {}))
+        self._clear_cluster_bboxes()
+        try:
+            boxes, roi_mask = self._obstacle_cluster.cluster(self.raw_points[:, :3], params)
+        except Exception as e:
+            self.frame_info_label.setText(f"聚类失败: {e}")
+            self._cluster_select_mask = None
+            self._selected_cluster_bbox_index = None
+            return
+
+        if len(roi_mask) > 0 and params.get("use_roi", True) and not np.any(roi_mask):
+            self.frame_info_label.setText("ROI 区域内没有点云，无法聚类")
+            self._cluster_select_mask = None
+            self._selected_cluster_bbox_index = None
+            return
+        if not boxes:
+            self.frame_info_label.setText("未检测到有效聚类")
+            self._cluster_select_mask = None
+            self._selected_cluster_bbox_index = None
+            return
+
+        for box in boxes:
+            color = QColor(255, 165, 0, 220)
+            bbox_item = draw_bbox(
+                float(box["x"]),
+                float(box["y"]),
+                float(box["z"]),
+                float(box["l"]),
+                float(box["w"]),
+                float(box["h"]),
+                float(box["yaw"]),
+                color,
+            )
+            self.glwidget.addItem(bbox_item)
+            self._cluster_bbox_items.append(bbox_item)
+            self._cluster_bbox_infos.append(dict(box))
+
+        if self._selected_cluster_bbox_index is not None and self._selected_cluster_bbox_index < len(self._cluster_bbox_infos):
+            self._update_cluster_select_mask_from_selected()
+        else:
+            self._selected_cluster_bbox_index = None
+            self._cluster_select_mask = None
+
+        self.frame_info_label.setText(f"聚类完成：{len(self._cluster_bbox_items)} 个包围框")
+
+    def _refresh_cluster_if_enabled(self):
+        """若已启用聚类，则在当前帧按最新参数自动刷新聚类框。"""
+        if not getattr(self, "_cluster_enabled", False):
+            return
+        if not hasattr(self, "raw_points") or self.raw_points is None or len(self.raw_points) == 0:
+            self._clear_cluster_bboxes()
+            return
+        params = getattr(self, "_cluster_params", None)
+        if not params:
+            return
+        self._cluster_current_frame()
+
+    def _update_cluster_select_mask_from_selected(self):
+        """根据当前选中的聚类框更新 raw_points 维度的点掩码。"""
+        idx = self._selected_cluster_bbox_index
+        if idx is None or idx < 0 or idx >= len(self._cluster_bbox_infos):
+            self._cluster_select_mask = None
+            return
+        if not hasattr(self, "raw_points") or self.raw_points is None or len(self.raw_points) == 0:
+            self._cluster_select_mask = None
+            return
+        info = self._cluster_bbox_infos[idx]
+        pts = np.asarray(self.raw_points[:, :3], dtype=np.float64)
+        x_c, y_c, z_c = info["x"], info["y"], info["z"]
+        l, w, h, yaw = info["l"], info["w"], info["h"], info["yaw"]
+        c = np.cos(-yaw)
+        s = np.sin(-yaw)
+        dx = pts[:, 0] - x_c
+        dy = pts[:, 1] - y_c
+        dz = pts[:, 2] - z_c
+        local_x = c * dx - s * dy
+        local_y = s * dx + c * dy
+        self._cluster_select_mask = (
+            (np.abs(local_x) <= l / 2.0) &
+            (np.abs(local_y) <= w / 2.0) &
+            (np.abs(dz) <= h / 2.0)
+        )
 
 
 # 全局样式：偏网页化的简洁风格
