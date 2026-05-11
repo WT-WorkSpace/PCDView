@@ -4,6 +4,25 @@ import numpy as np
 from PyQt5.QtGui import QVector3D, QVector4D, QMatrix4x4
 
 
+def _projection_view_matrices(glwidget):
+    """
+    与 GLViewWidget.paint / paintGL 使用同一套投影、视图矩阵。
+    新版 pyqtgraph 的 projectionMatrix(region, viewport) 需要参数；旧版可无参调用。
+    """
+    view = glwidget.viewMatrix()
+    get_vp = getattr(glwidget, "getViewport", None)
+    if callable(get_vp):
+        region = get_vp()
+    else:
+        region = (0, 0, glwidget.width(), glwidget.height())
+    proj_fn = glwidget.projectionMatrix
+    try:
+        proj = proj_fn(region, region)
+    except TypeError:
+        proj = proj_fn()
+    return proj, view
+
+
 def ray_from_screen(glwidget, screen_x, screen_y):
     """
     根据 GLViewWidget 的投影与视图矩阵，将屏幕坐标转换为世界空间射线。
@@ -15,8 +34,7 @@ def ray_from_screen(glwidget, screen_x, screen_y):
         return None
     x_ndc = 2.0 * screen_x / w - 1.0
     y_ndc = 1.0 - 2.0 * screen_y / h
-    proj = glwidget.projectionMatrix()
-    view = glwidget.viewMatrix()
+    proj, view = _projection_view_matrices(glwidget)
     combined = proj * view
     inv_result = combined.inverted()
     if isinstance(inv_result, tuple):
@@ -47,8 +65,7 @@ def world_to_screen(glwidget, world_pt):
     h = glwidget.deviceHeight()
     if w <= 0 or h <= 0:
         return None
-    proj = glwidget.projectionMatrix()
-    view = glwidget.viewMatrix()
+    proj, view = _projection_view_matrices(glwidget)
     combined = proj * view
     pts = np.atleast_2d(np.asarray(world_pt, dtype=np.float64))
     n = pts.shape[0]

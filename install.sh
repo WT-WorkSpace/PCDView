@@ -2,7 +2,7 @@
 set -eu
 
 # 使用 miniconda view 环境的 Python 运行 PyInstaller
-/home/wt/miniconda3/envs/view/bin/python -m PyInstaller --onefile --windowed \
+python -m PyInstaller --onefile --windowed \
   --name "PCDView" \
   --icon "icons/app.ico" \
   --add-data "icons/color.svg:icons" \
