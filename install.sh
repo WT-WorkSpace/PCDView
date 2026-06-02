@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 set -eu
 
-# 使用 miniconda view 环境的 Python 运行 PyInstaller
+# 使用当前环境的 Python 运行 PyInstaller（建议先 conda activate pcdview）
+CONDA_PREFIX="$(python -c 'import sys; print(sys.prefix)')"
+LIBEXPAT="${CONDA_PREFIX}/lib/libexpat.so.1"
+if [[ ! -f "${LIBEXPAT}" ]]; then
+  echo "错误: 未找到 libexpat: ${LIBEXPAT}" >&2
+  exit 1
+fi
+
 python -m PyInstaller --onefile --windowed \
+  --runtime-hook hooks/pyi_rth_libexpat.py \
+  --add-binary "${LIBEXPAT}:." \
   --name "PCDView" \
   --icon "icons/app.ico" \
   --add-data "icons/color.svg:icons" \
   --add-data "icons/coordinate.svg:icons" \
   --add-data "icons/fengguangming.ttf:icons" \
+  --add-data "icons/next.png:icons" \
   --add-data "icons/next.png:icons" \
   --add-data "icons/open.svg:icons" \
   --add-data "icons/open_dir.svg:icons" \
@@ -26,32 +36,54 @@ python -m PyInstaller --onefile --windowed \
   --add-data "icons/open_boxes_dir.svg:icons" \
   --add-data "icons/wangge.svg:icons" \
   --add-data "icons/add_bbox.svg:icons" \
+  --add-data "icons/extrinsic_calib.svg:icons" \
   qtvis.py
 
-# 生成桌面快捷方式（可直接在桌面看到图标）
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DESKTOP_DIR="$HOME/Desktop"
-APP_BIN="$PROJECT_DIR/dist/PCDView"
-ICON_PATH="$PROJECT_DIR/icons/app.ico"
-DESKTOP_FILE="$DESKTOP_DIR/PCDView.desktop"
+# 打包完成后在桌面创建快捷方式
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXE="${SCRIPT_DIR}/dist/PCDView"
+ICON="${SCRIPT_DIR}/icons/app.ico"
+DESKTOP_FILE=""
 
-mkdir -p "$DESKTOP_DIR"
-cat > "$DESKTOP_FILE" <<EOF
+if [[ ! -x "${EXE}" ]]; then
+  echo "错误: 未找到可执行文件 ${EXE}" >&2
+  exit 1
+fi
+
+DESKTOP_DIR="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+if [[ -z "${DESKTOP_DIR}" || ! -d "${DESKTOP_DIR}" ]]; then
+  for dir in "${HOME}/Desktop" "${HOME}/桌面"; do
+    if [[ -d "${dir}" ]]; then
+      DESKTOP_DIR="${dir}"
+      break
+    fi
+  done
+fi
+if [[ -z "${DESKTOP_DIR}" ]]; then
+  DESKTOP_DIR="${HOME}/Desktop"
+  mkdir -p "${DESKTOP_DIR}"
+fi
+
+DESKTOP_FILE="${DESKTOP_DIR}/PCDView.desktop"
+cat > "${DESKTOP_FILE}" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=PCDView
+Name[zh_CN]=PCDView
 Comment=Point Cloud Viewer
-Exec=$APP_BIN
-Icon=$ICON_PATH
+Comment[zh_CN]=点云可视化工具
+Exec=${EXE}
+Icon=${ICON}
 Terminal=false
-Categories=Graphics;Development;
+Categories=Graphics;Science;
 StartupNotify=true
 EOF
 
-chmod +x "$DESKTOP_FILE"
-# GNOME: 标记为受信任的桌面启动器，避免“Untrusted Desktop File”提示
+chmod +x "${DESKTOP_FILE}"
+# GNOME 等桌面需标记为“信任”，否则双击无反应
 if command -v gio >/dev/null 2>&1; then
-  gio set "$DESKTOP_FILE" metadata::trusted true || true
+  gio set "${DESKTOP_FILE}" metadata::trusted true 2>/dev/null || true
 fi
-echo "桌面图标已生成: $DESKTOP_FILE"
+
+echo "已在桌面创建快捷方式: ${DESKTOP_FILE}"

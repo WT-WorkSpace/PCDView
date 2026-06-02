@@ -9,3 +9,4 @@ scipy
 pillow ~= 10.4.0
 setuptools
 pyinstaller
+wata

@@ -2,6 +2,13 @@ from PyQt5.QtGui import QImage, QPixmap, QIcon
 from PIL import Image, ImageDraw, ImageFont
 import json
 import os
+import sys
+
+
+def _icons_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.join(sys._MEIPASS, "icons")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons")
 from PIL import Image, ImageFont, ImageDraw
 from utils.move_pcd import move_pcd_with_xyzrpy
 import numpy as np
@@ -35,8 +42,10 @@ def create_char_image(char, size=(32, 32)):
 
     return image
 
-def text_3d(text, density=10, font= os.path.join(os.path.dirname(os.path.abspath(__file__)),'../icons/fengguangming.ttf'), font_size=10):
-    font_obj = ImageFont.truetype(os.path.join(os.path.dirname(os.path.abspath(__file__)),'../icons/fengguangming.ttf'), int(font_size * density))
+def text_3d(text, density=10, font=None, font_size=10):
+    if font is None:
+        font = os.path.join(_icons_dir(), "fengguangming.ttf")
+    font_obj = ImageFont.truetype(font, int(font_size * density))
     font_dim = font_obj.getbbox(text)
     text_width = int((font_dim[2] - font_dim[0]))  # 计算宽度
     text_height = int((font_dim[3] - font_dim[1])*1.2)  # 计算高度

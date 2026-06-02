@@ -5,6 +5,9 @@ import json
 # 在导入 PyQt5 / pyqtgraph 之前，强制使用软件 OpenGL
 os.environ.setdefault("QT_XCB_FORCE_SOFTWARE_OPENGL", "1")
 os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+# 本项目使用 PyQt5；若环境中存在残缺的 PySide6（如仅 pyside6_essentials），
+# pyqtgraph 会误选 PySide6 并在读取 __version__ 时失败。
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 import numpy as np
 from pathlib import Path
 from natsort import natsorted
@@ -44,13 +47,16 @@ from ui.box_select_overlay import BoxSelectOverlay
 from dialogs.plane_param_dialog import PlaneParamDialog
 from dialogs.mask_param_dialog import MaskParamDialog
 from features.point_rect_select_mixin import PointRectSelectMixin
+from features.extrinsic_calib_mixin import ExtrinsicCalibMixin
 from features.plane_mixin import PlaneMixin
 from features.mask_mixin import MaskMixin
 from features.obstacle_cluster import ObstacleCluster
 
 LIST_POINT_SELECT_CAP = 8000  # 列表展示上限，避免一次框选过多点时界面卡死
 
-class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMixin, MaskMixin):
+class PointCloudViewer(
+    QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMixin, MaskMixin, ExtrinsicCalibMixin
+):
     def __init__(self):
         QMainWindow.__init__(self)
         PCDViewWidget.__init__(self)
@@ -61,7 +67,11 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         self.init_state()
 
     def init_ui(self):
-        self.curpath = os.path.dirname(os.path.abspath(__file__))
+        # PyInstaller onefile 下资源在 sys._MEIPASS/icons
+        if getattr(sys, "frozen", False):
+            self.curpath = sys._MEIPASS
+        else:
+            self.curpath = os.path.dirname(os.path.abspath(__file__))
         self.setWindowTitle("Point Cloud Viewer")
         self.setGeometry(100, 100, 850, 600)
         self.menu_bar = QMenuBar(self)
@@ -151,6 +161,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         self._selected_cluster_bbox_index = None
         self._cluster_select_mask = None  # 基于 raw_points 长度的 bool 掩码，标记被点击聚类框内的点
         self._cluster_enabled = False
+        self._extrinsic_init_state()
         self._obstacle_cluster = ObstacleCluster()
         self._cluster_params = {
             "eps": 0.5,
@@ -321,6 +332,14 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         )
         self._cluster_action.setCheckable(True)
         self.toolbar.addAction(self._cluster_action)
+        self.toolbar.addSeparator()
+        self._extrinsic_calib_action = self.create_action(
+            "外参标定",
+            "icons/extrinsic_calib.svg",
+            self._toggle_extrinsic_calib,
+        )
+        self._extrinsic_calib_action.setCheckable(True)
+        self.toolbar.addAction(self._extrinsic_calib_action)
 
         self.color_sidebar = QToolBar("colors", self)
         self.addToolBar(Qt.RightToolBarArea, self.color_sidebar)
@@ -356,6 +375,10 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         self._cluster_params_action = self.create_action(
             "当前帧点云聚类", "icons/cluster.svg", self._open_cluster_dialog
         )
+        self._extrinsic_calib_menu_action = self.create_action(
+            "多雷达外参标定", "icons/extrinsic_calib.svg", self._toggle_extrinsic_calib
+        )
+        self._extrinsic_calib_menu_action.setCheckable(True)
         self.save_view_action = self.create_action("Save View", 'icons/save_view.svg', self.save_view)
         self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
 
@@ -366,6 +389,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         tool_menu.addAction(self._modify_plane_params_action)
         tool_menu.addAction(self._mask_settings_action)
         tool_menu.addAction(self._cluster_params_action)
+        tool_menu.addAction(self._extrinsic_calib_menu_action)
         tool_menu.addAction(self.save_view_action)
         tool_menu.addAction(self.load_view_action)
 
@@ -779,6 +803,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
 
         self.directory = QFileDialog.getExistingDirectory(self, "Select Point Cloud Directory")
         if self.directory:
+            self._clear_session_extrinsic_offsets()
             self.point_cloud_files = natsorted([
                 f for f in os.listdir(self.directory) if f.endswith('.txt') or f.endswith('.pcd')
             ])
@@ -807,6 +832,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         self.colors = QColor(0, 0, 255).getRgbF()
         self._user_solid_rgbf = self.colors
         if self.pcd_file:
+            self._clear_session_extrinsic_offsets()
             self.directory = None
             self.point_cloud_files = []
             self.current_frame_index = -1
@@ -815,6 +841,7 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
             self._points_rect_select_mask = None
             if self._point_select_dock is not None:
                 self._reset_point_select_table_ui()
+            self._extrinsic_after_load_frame()
             self.vis_fram(updata_color_bar=True)
             self._set_topdown_view()
 
@@ -841,15 +868,15 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         self._points_rect_select_mask = None
         if self._point_select_dock is not None:
             self._reset_point_select_table_ui()
+        metadata_changed = metadata != self.metadata
+        if metadata_changed:
+            self.metadata = metadata
+        self._extrinsic_after_load_frame()
         if self.color_fields is not None:
             print(self.color_fields)
             self.colors = self.Colors[0](self.min_max_normalization(self.structured_points[self.color_fields]))
 
-        if metadata != self.metadata:
-            self.metadata = metadata
-            self.vis_fram(updata_color_bar=True)
-        else:
-            self.vis_fram(updata_color_bar=False)
+        self.vis_fram(updata_color_bar=metadata_changed)
         end1_time = time.time()
         self.frame_info_label.setText(
             f"Frame: {self.current_frame_index + 1} / {len(self.point_cloud_files)} ({self.point_cloud_files[self.current_frame_index]})")
@@ -1127,6 +1154,25 @@ class PointCloudViewer(QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMi
         structured_for_display = getattr(self, "structured_points", None)
         if structured_for_display is not None and len(keep_inside_mask) == len(structured_for_display):
             structured_for_display = structured_for_display[keep_inside_mask]
+
+        extrinsic_mode = getattr(self, "_extrinsic_calib_mode", False)
+        mask_for_extrinsic = None
+        if hasattr(self, "raw_points") and self.raw_points is not None:
+            full_xyz = self.raw_points[:, :3]
+            mask_for_extrinsic = self._mask_keep_inside_points(full_xyz)
+
+        if extrinsic_mode:
+            pos, rgba = self._extrinsic_build_pos_rgba(mask_for_extrinsic)
+            self.points = pos if pos is not None else np.empty((0, 3))
+            if rgba is None:
+                rgba = np.empty((0, 4))
+            self.scatter = GLScatterPlotItem(pos=self.points, color=rgba, size=self.point_size)
+            self.colors = rgba
+            self.glwidget.addItem(self.scatter)
+            if updata_color_bar:
+                self.update_color_sidebar()
+            self._refresh_cluster_if_enabled()
+            return
 
         if self.color_fields is not None:
             if len(structured_for_display) > 0 and max(structured_for_display[self.color_fields]) >= 0:

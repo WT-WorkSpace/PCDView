@@ -79,8 +79,13 @@ class PCDViewWidget(QWidget):
         self.glwidget.setCameraPosition(distance=self.glwidget.opts['distance'], elevation=90, azimuth=0)
 
         """添加点云到视图窗口中"""
-        curpath = os.path.dirname(os.path.abspath(__file__))
-        text_points = text_3d("Point Cloud Viewer", density=2, font=os.path.join(curpath,'../icons/fengguangming.ttf'), font_size=10)
+        from utils.utils import _icons_dir
+        text_points = text_3d(
+            "Point Cloud Viewer",
+            density=2,
+            font=os.path.join(_icons_dir(), "fengguangming.ttf"),
+            font_size=10,
+        )
         text_points = move_pcd_with_xyzrpy(text_points, [0,0,0,0,-90,0],seq="xyz", degrees=True)
         self.raw_points = text_points
 

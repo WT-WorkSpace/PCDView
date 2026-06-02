@@ -55,10 +55,61 @@ def parse_binary_compressed_pc_data(f, dtype, metadata):
     for dti in range(len(dtype)):
         dt = dtype[dti]
         bytes = dt.itemsize * metadata['width']
-        column = np.fromstring(buf[ix:(ix + bytes)], dt)
+        column = np.frombuffer(buf[ix:(ix + bytes)], dtype=dt)
         pc_data[dtype.names[dti]] = column
         ix += bytes
     return pc_data
+
+
+def _default_size_for_pcd_type(type_char):
+    """PCD 头缺少 SIZE 时，按 TYPE 字母推断常见字节数。"""
+    t = str(type_char).strip().upper()
+    if t == 'F':
+        return 4
+    if t == 'U':
+        return 1
+    if t == 'I':
+        return 4
+    return 4
+
+
+def _normalize_pcd_metadata(metadata):
+    """补齐 PCD 头缺省字段，并将 map 转为 list（Python 3）。"""
+    if 'fields' not in metadata:
+        raise ValueError("PCD 头缺少 FIELDS")
+
+    n = len(metadata['fields'])
+    if 'type' not in metadata:
+        metadata['type'] = ['F'] * n
+    else:
+        metadata['type'] = list(metadata['type'])
+
+    if 'size' not in metadata:
+        metadata['size'] = [_default_size_for_pcd_type(t) for t in metadata['type']]
+    else:
+        metadata['size'] = [int(x) for x in metadata['size']]
+
+    if 'count' not in metadata:
+        metadata['count'] = [1] * n
+    else:
+        metadata['count'] = [int(x) for x in metadata['count']]
+
+    if len(metadata['type']) != n or len(metadata['size']) != n or len(metadata['count']) != n:
+        raise ValueError(
+            "PCD 头 FIELDS/TYPE/SIZE/COUNT 数量不一致: "
+            "fields={}, type={}, size={}, count={}".format(
+                n, len(metadata['type']), len(metadata['size']), len(metadata['count'])
+            )
+        )
+
+    if 'viewpoint' not in metadata:
+        metadata['viewpoint'] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    else:
+        metadata['viewpoint'] = [float(x) for x in metadata['viewpoint']]
+
+    if 'version' not in metadata:
+        metadata['version'] = '.7'
+    return metadata
 
 
 def parse_header(lines):
@@ -66,34 +117,27 @@ def parse_header(lines):
     """
     metadata = {}
     for ln in lines:
+        ln = ln.strip()
         if ln.startswith('#') or len(ln) < 2:
             continue
-        match = re.match('(\w+)\s+([\w\s\.]+)', ln)
+        match = re.match(r'(\w+)\s+(.+)', ln)
         if not match:
             warnings.warn("warning: can't understand line: %s" % ln)
             continue
-        key, value = match.group(1).lower(), match.group(2)
+        key, value = match.group(1).lower(), match.group(2).strip()
         if key == 'version':
             metadata[key] = value
         elif key in ('fields', 'type'):
             metadata[key] = value.split()
         elif key in ('size', 'count'):
-            metadata[key] = map(int, value.split())
+            metadata[key] = [int(x) for x in value.split()]
         elif key in ('width', 'height', 'points'):
             metadata[key] = int(value)
         elif key == 'viewpoint':
-            metadata[key] = map(float, value.split())
+            metadata[key] = [float(x) for x in value.split()]
         elif key == 'data':
             metadata[key] = value.strip().lower()
-        # TODO apparently count is not required?
-    # add some reasonable defaults
-    if 'count' not in metadata:
-        metadata['count'] = [1] * len(metadata['fields'])
-    if 'viewpoint' not in metadata:
-        metadata['viewpoint'] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
-    if 'version' not in metadata:
-        metadata['version'] = '.7'
-    return metadata
+    return _normalize_pcd_metadata(metadata)
 
 
 def _build_dtype(metadata):
@@ -182,3 +226,64 @@ def load_structured_points(file_path):
     with open(file_path, 'rb') as f:
         points, metadata = points_from_fileobj(f)
     return points, metadata
+
+
+def save_structured_points(structured, metadata, save_path):
+    """将 structured 点云写回 PCD，保留 metadata 中的字段与 DATA 格式。"""
+    metadata = _normalize_pcd_metadata(dict(metadata))
+    structured = np.ascontiguousarray(structured)
+    point_num = int(structured.shape[0])
+    metadata["points"] = point_num
+    metadata["width"] = point_num
+    metadata["height"] = 1
+
+    fields_str = " ".join(metadata["fields"])
+    size_str = " ".join(map(str, metadata["size"]))
+    type_str = " ".join(metadata["type"])
+    count_str = " ".join(map(str, metadata["count"]))
+    data_type = metadata["data"]
+    viewpoint = metadata.get("viewpoint", [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+    vp_str = " ".join(map(str, viewpoint))
+    version = metadata.get("version", ".7")
+
+    with open(save_path, "wb") as pcd_file:
+        pcd_file.write("# .PCD v0.7 - Point Cloud Data file format\n".encode("utf-8"))
+        pcd_file.write("VERSION {}\n".format(version).encode("utf-8"))
+        pcd_file.write("FIELDS {}\n".format(fields_str).encode("utf-8"))
+        pcd_file.write("SIZE {}\n".format(size_str).encode("utf-8"))
+        pcd_file.write("TYPE {}\n".format(type_str).encode("utf-8"))
+        pcd_file.write("COUNT {}\n".format(count_str).encode("utf-8"))
+        pcd_file.write("WIDTH {}\n".format(point_num).encode("utf-8"))
+        pcd_file.write("HEIGHT 1\n".encode("utf-8"))
+        pcd_file.write("VIEWPOINT {}\n".format(vp_str).encode("utf-8"))
+        pcd_file.write("POINTS {}\n".format(point_num).encode("utf-8"))
+        pcd_file.write("DATA {}\n".format(data_type).encode("utf-8"))
+
+        if data_type == "ascii":
+            valid_fields = [f for f in metadata["fields"] if f != "_"]
+            for i in range(point_num):
+                row = [structured[f][i] for f in valid_fields]
+                pcd_file.write((" ".join(map(str, row)) + "\n").encode("utf-8"))
+        elif data_type == "binary":
+            pcd_file.write(structured.tobytes(order="C"))
+        elif data_type == "binary_compressed":
+            uncompressed_lst = []
+            for fieldname in structured.dtype.names:
+                column = np.ascontiguousarray(structured[fieldname]).tobytes()
+                uncompressed_lst.append(column)
+            uncompressed = b"".join(uncompressed_lst)
+            uncompressed_size = len(uncompressed)
+            buf = lzf.compress(uncompressed)
+            if buf is None:
+                buf = uncompressed
+                compressed_size = uncompressed_size
+            else:
+                compressed_size = len(buf)
+            pcd_file.write(struct.pack("II", compressed_size, uncompressed_size))
+            pcd_file.write(buf)
+        else:
+            raise ValueError(
+                'DATA 须为 "ascii"、"binary" 或 "binary_compressed"，当前为 {}'.format(
+                    data_type
+                )
+            )
