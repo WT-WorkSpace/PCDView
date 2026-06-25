@@ -9,6 +9,14 @@ def _icons_dir():
     if getattr(sys, "frozen", False):
         return os.path.join(sys._MEIPASS, "icons")
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "icons")
+
+
+def app_icon_path():
+    return os.path.join(_icons_dir(), "app.ico")
+
+
+def app_icon():
+    return QIcon(app_icon_path())
 from PIL import Image, ImageFont, ImageDraw
 from utils.move_pcd import move_pcd_with_xyzrpy
 import numpy as np

@@ -36,6 +36,7 @@ from utils.extrinsic_calib import (
     lidar_id_to_str,
     mask_lidar,
     resolve_lidar1_id,
+    same_lidar_id,
     save_corrected_structured_with_wata,
     structured_to_points_array,
     unique_lidar_ids,
@@ -125,12 +126,18 @@ class ExtrinsicCalibMixin:
             else:
                 new_offsets[lid] = list(get_offset_for_lidar(lid, session))
         self._extrinsic_offsets = new_offsets
-        try:
-            self._extrinsic_ref_lidar_id = resolve_lidar1_id(self._extrinsic_lidar_ids)
-            self._extrinsic_offsets[self._extrinsic_ref_lidar_id] = [0.0] * 6
-        except ValueError:
-            if self._extrinsic_lidar_ids:
-                self._extrinsic_ref_lidar_id = self._extrinsic_lidar_ids[0]
+        if (
+            self._extrinsic_ref_lidar_id is None
+            or not any(
+                same_lidar_id(self._extrinsic_ref_lidar_id, lid)
+                for lid in self._extrinsic_lidar_ids
+            )
+        ):
+            try:
+                self._extrinsic_ref_lidar_id = resolve_lidar1_id(self._extrinsic_lidar_ids)
+            except ValueError:
+                if self._extrinsic_lidar_ids:
+                    self._extrinsic_ref_lidar_id = self._extrinsic_lidar_ids[0]
 
     def _extrinsic_after_load_frame(self):
         """load_frame / open_file 之后调用：保存原始帧并套用会话外参。"""
@@ -278,8 +285,8 @@ class ExtrinsicCalibMixin:
         lay.setSpacing(8)
 
         hint = QLabel(
-            "雷达 1 为固定锚点（位姿恒为 0）。可手动微调，或使用「ICP 多轮精配准」："
-            "先为每台雷达选最佳配对目标初对齐，再对融合点云多轮迭代；满意后点「应用校正」。"
+            "可在「配准目标雷达」中选择 ICP 对齐的参考雷达；各雷达外参均可手动微调"
+            "（步进 0.1，无范围限制）。满意后点「应用校正」。"
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#546e7a; font-size:12px; padding:4px;")
@@ -290,9 +297,9 @@ class ExtrinsicCalibMixin:
         self._extrinsic_lidar_combo = QComboBox()
         self._extrinsic_lidar_combo.currentIndexChanged.connect(self._extrinsic_on_lidar_selected)
         lidar_form.addRow("当前雷达", self._extrinsic_lidar_combo)
-        self._extrinsic_ref_check = QCheckBox("设为参考雷达")
-        self._extrinsic_ref_check.stateChanged.connect(self._extrinsic_on_ref_changed)
-        lidar_form.addRow(self._extrinsic_ref_check)
+        self._extrinsic_ref_combo = QComboBox()
+        self._extrinsic_ref_combo.currentIndexChanged.connect(self._extrinsic_on_ref_combo_changed)
+        lidar_form.addRow("配准目标雷达", self._extrinsic_ref_combo)
         self._extrinsic_vis_widget = QWidget()
         self._extrinsic_vis_layout = QVBoxLayout(self._extrinsic_vis_widget)
         self._extrinsic_vis_layout.setContentsMargins(0, 0, 0, 0)
@@ -309,28 +316,19 @@ class ExtrinsicCalibMixin:
 
         param_group = QGroupBox("位姿 [dx,dy,dz, roll,pitch,yaw]")
         param_form = QFormLayout(param_group)
-        # (min, max, step, decimals) — decimals 须 ≥ 步长精度，否则箭头步进会被 Qt 抬到 0.1
-        ranges = [
-            (-5.0, 5.0, 0.01, 3),       # 平移 1 cm
-            (-5.0, 5.0, 0.01, 3),
-            (-5.0, 5.0, 0.01, 3),
-            (-180.0, 180.0, 0.01, 2),   # 旋转 0.01°
-            (-180.0, 180.0, 0.01, 2),
-            (-180.0, 180.0, 0.01, 2),
-        ]
         self._extrinsic_spins = {}
-        for key, label, (lo, hi, step, decimals) in zip(PARAM_KEYS, PARAM_LABELS, ranges):
+        for key, label in zip(PARAM_KEYS, PARAM_LABELS):
             spin = QDoubleSpinBox()
-            spin.setRange(lo, hi)
-            spin.setDecimals(decimals)
-            spin.setSingleStep(step)
+            spin.setRange(-1e9, 1e9)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.1)
             spin.setKeyboardTracking(True)
             spin.valueChanged.connect(self._extrinsic_on_param_changed)
             param_form.addRow(label, spin)
             self._extrinsic_spins[key] = spin
         lay.addWidget(param_group)
 
-        self._extrinsic_btn_icp = QPushButton("ICP 多轮精配准（雷达1固定）")
+        self._extrinsic_btn_icp = QPushButton("ICP 多轮精配准")
         self._extrinsic_btn_icp.setStyleSheet(
             "QPushButton { background:#5c6bc0; color:white; font-weight:600; "
             "min-height:32px; border-radius:4px; }"
@@ -393,6 +391,24 @@ class ExtrinsicCalibMixin:
         for lid in self._extrinsic_lidar_ids:
             self._extrinsic_lidar_combo.addItem("雷达 {}".format(lidar_id_to_str(lid)), lid)
         self._extrinsic_lidar_combo.blockSignals(False)
+
+        self._extrinsic_ref_combo.blockSignals(True)
+        self._extrinsic_ref_combo.clear()
+        for lid in self._extrinsic_lidar_ids:
+            self._extrinsic_ref_combo.addItem("雷达 {}".format(lidar_id_to_str(lid)), lid)
+        ref_idx = 0
+        if self._extrinsic_ref_lidar_id is not None:
+            for i in range(self._extrinsic_ref_combo.count()):
+                if same_lidar_id(
+                    self._extrinsic_ref_combo.itemData(i), self._extrinsic_ref_lidar_id
+                ):
+                    ref_idx = i
+                    break
+        if self._extrinsic_lidar_ids:
+            self._extrinsic_ref_combo.setCurrentIndex(ref_idx)
+            self._extrinsic_ref_lidar_id = self._extrinsic_ref_combo.currentData()
+        self._extrinsic_ref_combo.blockSignals(False)
+
         if self._extrinsic_lidar_ids:
             self._extrinsic_lidar_combo.setCurrentIndex(0)
         self._extrinsic_rebuild_vis_checks()
@@ -402,6 +418,7 @@ class ExtrinsicCalibMixin:
         self._extrinsic_status.setText(
             "当前帧 {} 点，{} 台雷达".format(n, len(self._extrinsic_lidar_ids))
         )
+        self._extrinsic_on_ref_combo_changed()
 
     def _extrinsic_rebuild_vis_checks(self):
         self._extrinsic_loading_vis = True
@@ -435,37 +452,23 @@ class ExtrinsicCalibMixin:
         for i, key in enumerate(PARAM_KEYS):
             self._extrinsic_spins[key].setValue(vals[i])
         self._extrinsic_loading_params = False
-        enabled = self._extrinsic_ref_lidar_id is None or lid != self._extrinsic_ref_lidar_id
-        for spin in self._extrinsic_spins.values():
-            spin.setEnabled(enabled)
 
     def _extrinsic_on_lidar_selected(self):
         self._extrinsic_sync_spins()
         self._extrinsic_update_color_preview()
-        is_ref = (
-            self._extrinsic_ref_lidar_id is not None
-            and self._extrinsic_current_lidar() == self._extrinsic_ref_lidar_id
-        )
-        self._extrinsic_ref_check.blockSignals(True)
-        self._extrinsic_ref_check.setChecked(is_ref)
-        self._extrinsic_ref_check.blockSignals(False)
 
-    def _extrinsic_on_ref_changed(self, state):
-        lid = self._extrinsic_current_lidar()
-        if state == Qt.Checked:
-            self._extrinsic_ref_lidar_id = lid
-            self._extrinsic_offsets[lid] = [0.0] * 6
-            self._extrinsic_sync_spins()
-        elif lid == self._extrinsic_ref_lidar_id:
-            self._extrinsic_ref_lidar_id = None
-            self._extrinsic_sync_spins()
-        self.vis_fram(updata_color_bar=False)
+    def _extrinsic_on_ref_combo_changed(self):
+        ref_lid = self._extrinsic_ref_combo.currentData()
+        if ref_lid is not None:
+            self._extrinsic_ref_lidar_id = ref_lid
+        ref_name = lidar_id_to_str(self._extrinsic_ref_lidar_id or "?")
+        self._extrinsic_btn_icp.setText("ICP 多轮精配准（对齐到雷达 {}）".format(ref_name))
 
     def _extrinsic_on_param_changed(self):
         if self._extrinsic_loading_params:
             return
         lid = self._extrinsic_current_lidar()
-        if self._extrinsic_ref_lidar_id is not None and lid == self._extrinsic_ref_lidar_id:
+        if lid is None:
             return
         self._extrinsic_offsets[lid] = [
             self._extrinsic_spins[k].value() for k in PARAM_KEYS
@@ -514,9 +517,7 @@ class ExtrinsicCalibMixin:
 
     def _extrinsic_reset_current(self):
         lid = self._extrinsic_current_lidar()
-        if lid is None or (
-            self._extrinsic_ref_lidar_id is not None and lid == self._extrinsic_ref_lidar_id
-        ):
+        if lid is None:
             return
         self._extrinsic_offsets[lid] = [0.0] * 6
         self._extrinsic_sync_spins()
@@ -539,21 +540,21 @@ class ExtrinsicCalibMixin:
         if len(self._extrinsic_lidar_ids) < 2:
             QMessageBox.information(self, "ICP", "至少需要 2 台雷达才能配准")
             return
-        try:
-            resolve_lidar1_id(self._extrinsic_lidar_ids)
-        except ValueError as e:
-            QMessageBox.warning(self, "ICP", str(e))
+        ref_lid = self._extrinsic_ref_lidar_id
+        if ref_lid is None:
+            QMessageBox.warning(self, "ICP", "请先选择配准目标雷达")
             return
 
+        ref_name = lidar_id_to_str(ref_lid)
         reply = QMessageBox.question(
             self,
             "ICP 多轮精配准",
-            "方案说明（雷达 1 位姿始终为 0，不会改变）：\n"
-            "1. 初对齐：每台雷达对「雷达1 或已对齐雷达」做 ICP，自动选重叠最好的目标；\n"
+            "方案说明（参考雷达 {} 位姿保持不变）：\n"
+            "1. 初对齐：每台雷达对「参考雷达或已对齐雷达」做 ICP，自动选重叠最好的目标；\n"
             "2. 全局迭代：多轮将各雷达对齐到「除自身外所有雷达的融合点云」；\n"
             "3. 逐步缩小对应距离，直至参数收敛。\n\n"
-            "结果写入右侧位姿并用于播放/切帧；满意后可点「应用校正」固化。\n\n"
-            "是否继续？",
+            "结果写入右侧位姿并用于播放/切帧；满意后可点「应用校正」。\n\n"
+            "是否继续？".format(ref_name),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -567,6 +568,7 @@ class ExtrinsicCalibMixin:
                 self.metadata,
                 self._extrinsic_offsets,
                 self._extrinsic_lidar_ids,
+                ref_lid=ref_lid,
                 global_refine_rounds=4,
             )
             self._extrinsic_offsets = new_offsets
@@ -584,6 +586,7 @@ class ExtrinsicCalibMixin:
                 self._rebuild_raw_points_from_structured()
             self._extrinsic_sync_spins()
             self._extrinsic_on_lidar_selected()
+            self._extrinsic_on_ref_combo_changed()
             self.vis_fram(updata_color_bar=False)
 
             lines = [summary, "", "—— 初对齐 ——"]

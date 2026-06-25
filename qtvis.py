@@ -40,7 +40,7 @@ from utils.utils import pil2qicon
 from utils.load_pcd import get_points_from_pcd_file
 from utils.load_bboxes_json import get_anno_from_tanway_json, save_bboxes_to_tanway_json
 
-from utils.utils import load_json
+from utils.utils import load_json, app_icon
 
 # 将部分“独立类”拆分到单独文件中，避免 qtvis.py 过长
 from ui.box_select_overlay import BoxSelectOverlay
@@ -73,6 +73,7 @@ class PointCloudViewer(
         else:
             self.curpath = os.path.dirname(os.path.abspath(__file__))
         self.setWindowTitle("Point Cloud Viewer")
+        self.setWindowIcon(app_icon())
         self.setGeometry(100, 100, 850, 600)
         self.menu_bar = QMenuBar(self)
         self.setMenuBar(self.menu_bar)
@@ -1671,6 +1672,7 @@ if __name__ == "__main__":
     QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(app_icon())
     app.setStyleSheet(GLOBAL_STYLESHEET)
     viewer = PointCloudViewer()
     viewer.show()

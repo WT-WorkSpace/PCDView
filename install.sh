@@ -14,6 +14,7 @@ python -m PyInstaller --onefile --windowed \
   --add-binary "${LIBEXPAT}:." \
   --name "PCDView" \
   --icon "icons/app.ico" \
+  --add-data "icons/app.ico:icons" \
   --add-data "icons/color.svg:icons" \
   --add-data "icons/coordinate.svg:icons" \
   --add-data "icons/fengguangming.ttf:icons" \

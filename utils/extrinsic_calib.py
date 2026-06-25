@@ -223,6 +223,7 @@ def icp_multi_refine_align(
     fields,
     offsets: dict,
     lidar_ids: list,
+    ref_lid=None,
     max_points_per_lidar: int = 50000,
     max_iterations: int = 40,
     max_correspondence_distance: float = 2.0,
@@ -230,29 +231,51 @@ def icp_multi_refine_align(
     voxel_size: float = None,
 ) -> tuple:
     """
-    多阶段外参自动配准（雷达 1 位姿恒为 0，绝不改动）。
+    多阶段外参自动配准（参考雷达位姿在配准过程中保持不变）。
 
-    阶段 1 — 初对齐：每台雷达对「雷达1 + 已对齐雷达」做 ICP，选 RMSE 最小的目标。
+    阶段 1 — 初对齐：每台雷达对「参考雷达 + 已对齐雷达」做 ICP，选 RMSE 最小的目标。
     阶段 2 — 全局迭代：多轮将每台雷达对「除自身外所有雷达的融合点云」做 ICP，逐步收紧对应距离直至收敛。
     终检 — 输出各雷达相对融合图的 RMSE / 内点率。
 
+    ref_lid: 配准目标（参考）雷达；为 None 时尝试 lidar_id=1，否则取列表首项。
+
     返回 (新 offsets, ref_lidar_id, reports, summary_text)。
     """
-    ref_lid = resolve_lidar1_id(lidar_ids)
+    if ref_lid is None:
+        try:
+            ref_lid = resolve_lidar1_id(lidar_ids)
+        except ValueError:
+            if not lidar_ids:
+                raise ValueError("点云中无雷达")
+            ref_lid = lidar_ids[0]
+    elif not any(same_lidar_id(ref_lid, lid) for lid in lidar_ids):
+        raise ValueError(
+            "参考雷达 {} 不在当前帧雷达列表中: {}".format(
+                lidar_id_to_str(ref_lid), lidar_ids
+            )
+        )
+    for lid in lidar_ids:
+        if same_lidar_id(lid, ref_lid):
+            ref_lid = lid
+            break
+
     pts_full = structured_to_points_array(structured, fields)
-    ref_xyz = _lidar_xyz_transformed(pts_full, ref_lid, [0.0] * 6)
+    ref_off_locked = list(get_offset_for_lidar(ref_lid, offsets))
+    ref_xyz = _lidar_xyz_transformed(pts_full, ref_lid, ref_off_locked)
     if len(ref_xyz) < 10:
-        raise ValueError("参考雷达 1 点数过少（<10）")
+        raise ValueError(
+            "参考雷达 {} 点数过少（<10）".format(lidar_id_to_str(ref_lid))
+        )
 
     if voxel_size is None:
         voxel_size = auto_voxel_size(ref_xyz)
 
     new_offsets = {lid: list(get_offset_for_lidar(lid, offsets)) for lid in lidar_ids}
-    new_offsets[ref_lid] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    new_offsets[ref_lid] = list(ref_off_locked)
 
     reports = []
     summary_lines = [
-        "方案：雷达1固定 → 最佳配对初对齐 → 多轮全局融合精配准",
+        "方案：参考雷达固定 → 最佳配对初对齐 → 多轮全局融合精配准",
         "参考雷达: {}".format(lidar_id_to_str(ref_lid)),
     ]
 
@@ -264,7 +287,7 @@ def icp_multi_refine_align(
             "rmse": 0.0,
             "converged": True,
             "target": None,
-            "message": "位姿锁定为 0",
+            "message": "位姿锁定不变",
         }
     )
 
@@ -405,8 +428,8 @@ def icp_multi_refine_align(
             summary_lines.append("全局迭代已收敛，提前结束")
             break
 
-    # 锚定：强制雷达 1 为 0（防止数值漂移写入）
-    new_offsets[ref_lid] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # 锚定：参考雷达保持配准前位姿（防止数值漂移写入）
+    new_offsets[ref_lid] = list(ref_off_locked)
 
     # 各雷达最终 RMSE（相对融合图）
     for lid in sorted_others:
@@ -464,7 +487,7 @@ def offsets_for_export(offsets: dict, lidar_ids: list) -> dict:
 def export_offsets_json(path, pcd_path, offsets, lidar_ids, ref_lidar_id):
     payload = {
         "source_pcd": pcd_path,
-        "description": "相对加载时点云坐标系的增量变换; 参考雷达偏移应为全 0",
+        "description": "相对加载时点云坐标系的增量变换; 参考雷达在 ICP 配准时保持不变",
         "reference_lidar_id": (
             None if ref_lidar_id is None else str(ref_lidar_id)
         ),
