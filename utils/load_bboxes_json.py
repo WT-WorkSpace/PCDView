@@ -1,6 +1,11 @@
 import json
 import numpy as np
-from utils.utils import wataprint
+
+try:
+    from utils.utils import wataprint
+except ModuleNotFoundError:
+    def wataprint(message, type=None):
+        print(message)
 
 def get_anno_from_tanway_json(json_data):
         '''
@@ -27,6 +32,7 @@ def get_anno_from_tanway_json(json_data):
         link_id_list = []
         confidence_list = []
         movement_state_list = []
+        tag_list = []
         numPoints_list = []
         pitch_list = []
 
@@ -41,6 +47,7 @@ def get_anno_from_tanway_json(json_data):
             else:
                 id_list.append(None)
             if 'tag' in agent:
+                tag_list.append(dict(agent["tag"]) if isinstance(agent["tag"], dict) else {})
                 if 'movement_state' in agent["tag"]:
                     movement_state_list.append(agent["tag"]["movement_state"])
                 else:
@@ -54,6 +61,7 @@ def get_anno_from_tanway_json(json_data):
                 link_id_val = agent["tag"].get("link_id") if "link_id" in agent["tag"] else agent["tag"].get("link_ID")
                 link_id_list.append(link_id_val)
             elif 'tags' in agent:
+                tag_list.append(dict(agent["tags"]) if isinstance(agent["tags"], dict) else {})
                 if 'movement_state' in agent["tags"]:
                     movement_state_list.append(agent["tags"]["movement_state"])
                 else:
@@ -70,6 +78,7 @@ def get_anno_from_tanway_json(json_data):
                 confidence_list.append(None)
                 movement_state_list.append(None)
                 link_id_list.append(None)
+                tag_list.append({})
 
             numPoints = [None] * 10
             for key in agent.keys():
@@ -85,6 +94,7 @@ def get_anno_from_tanway_json(json_data):
             "movement_state": movement_state_list,
             "id": id_list,
             "link_id": link_id_list,
+            "tag": tag_list,
             'pitch': pitch_list,
             'numPoints': numPoints_list
         }
@@ -94,7 +104,8 @@ def get_anno_from_tanway_json(json_data):
 def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
     """
     将 bbox_infos 保存为 Tanway JSON 格式。
-    bbox_infos: list of dict, 每个含 x,y,z,l,w,h,yaw, class_name, 及可选的 id, link_id, pitch, roll 等。
+    bbox_infos: list of dict, 每个含 x,y,z,l,w,h,yaw, class_name, 及可选的 id, link_id, pitch, roll,
+    confidence, movement_state 等。
     original_agents: 原始 JSON 的 agent 列表，用于保留额外字段；若为 None 则仅用 bbox_infos 生成。
     """
     agents_out = []
@@ -139,13 +150,41 @@ def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
         bid = info.get("id")
         if bid is not None:
             agent["ID"] = bid
+        else:
+            agent.pop("ID", None)
+
+        tag = agent.get("tag") or agent.get("tags") or {}
+        tag = dict(tag) if isinstance(tag, dict) else {}
         link_id = info.get("link_id")
+        confidence = info.get("confidence")
+        movement_state = info.get("movement_state")
         if link_id is not None:
-            tag = agent.get("tag") or agent.get("tags") or {}
-            if isinstance(tag, dict):
-                tag = dict(tag)
-                tag["link_id"] = link_id
-                agent["tag"] = tag
+            tag["link_id"] = link_id
+        else:
+            tag.pop("link_id", None)
+            tag.pop("link_ID", None)
+        if confidence is not None:
+            tag["confidence"] = confidence
+        else:
+            tag.pop("confidence", None)
+        if movement_state is not None:
+            tag["movement_state"] = movement_state
+        else:
+            tag.pop("movement_state", None)
+
+        reserved_keys = {
+            "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
+            "class_name", "id", "link_id", "confidence", "movement_state",
+        }
+        for key, value in info.items():
+            if key in reserved_keys:
+                continue
+            if value is not None:
+                tag[key] = value
+            else:
+                tag.pop(key, None)
+        agent["tag"] = tag
+        agent.pop("tags", None)
 
         agents_out.append(agent)
 
@@ -198,8 +237,8 @@ def get_anno_from_beisai_json(label_path):
 
     for i, agent in enumerate(beisai_data[0]["objects"]):
         obj_type = None
-        confidence = 3
-        movement_state = 0
+        confidence = None
+        movement_state = None
         link_id = None
         obj_id = None
 

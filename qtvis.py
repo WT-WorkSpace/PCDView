@@ -36,6 +36,7 @@ from utils.bbox_pick import (
 )
 from widget.opengl_widget import PCDViewWidget
 from widget.bbox_three_views import BboxThreeViewsPanel
+from widget.bbox_attr_panel import BboxAttributePanel
 from utils.utils import pil2qicon
 from utils.load_pcd import get_points_from_pcd_file
 from utils.load_bboxes_json import get_anno_from_tanway_json, save_bboxes_to_tanway_json
@@ -46,6 +47,7 @@ from utils.utils import load_json, app_icon
 from ui.box_select_overlay import BoxSelectOverlay
 from dialogs.plane_param_dialog import PlaneParamDialog
 from dialogs.mask_param_dialog import MaskParamDialog
+from dialogs.bbox_attr_settings_dialog import BboxAttrSettingsDialog
 from features.point_rect_select_mixin import PointRectSelectMixin
 from features.extrinsic_calib_mixin import ExtrinsicCalibMixin
 from features.plane_mixin import PlaneMixin
@@ -115,13 +117,17 @@ class PointCloudViewer(
         self.metadata = None
         self.current_bbox_items = []
         self.current_bbox_infos = []  # 每个框的详细信息，用于点击弹窗
+        self.bbox_attr_defs = self._load_bbox_attr_defs()
         self.current_link_arrows = []  # Semitrailer 指向 link_id 目标的弧线箭头
         self.selected_bbox_index = None  # 当前选中的框索引，用于实体框高亮
         self.box_select_mode = False  # 框选模式：拖拽生成新矩形框
         self.box_select_start = None  # 框选起始屏幕坐标 (x, y)，设备像素
         self.box_select_start_logical = None  # 框选起始逻辑坐标，用于 overlay 绘制
+        self._bbox_drag_state = None  # 选中目标框后左键拖动移动框
         self.bbox_modified = False  # 框是否被修改过，用于显示 Save 按钮
         self.original_json_agents = None  # 原始 JSON agent 列表，保存时用于保留额外字段
+        self.bboxes_directory = None
+        self.json_path = None
 
         self.points_rect_select_mode = False  # 点云框选：拖拽矩形，选中点标红并列表展示
         self._points_rect_select_mask = None  # 与当前点云等长的 bool 掩码，或 None
@@ -248,7 +254,19 @@ class PointCloudViewer(
         # Backspace 删除选中的目标框
         self.delete_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self)
         self.delete_shortcut.activated.connect(self._delete_selected_bbox)
+        self.rotate_yaw_shortcut = QShortcut(QKeySequence(Qt.Key_C), self)
+        self.rotate_yaw_shortcut.activated.connect(self._rotate_selected_bbox_yaw_90)
         # 主视图右上角 Save 按钮（修改框后显示）
+        self.copy_prev_bboxes_btn = QPushButton("Copy Prev", self.glwidget)
+        self.copy_prev_bboxes_btn.setStyleSheet(
+            "QPushButton { background-color: #4B5563; color: white; padding: 6px 12px; "
+            "border-radius: 4px; font-weight: bold; } "
+            "QPushButton:hover { background-color: #374151; } "
+            "QPushButton:disabled { background-color: #9CA3AF; color: #F3F4F6; }"
+        )
+        self.copy_prev_bboxes_btn.clicked.connect(self._copy_previous_frame_bboxes)
+        self.copy_prev_bboxes_btn.hide()
+
         self.save_bboxes_btn = QPushButton("Save", self.glwidget)
         self.save_bboxes_btn.setStyleSheet(
             "QPushButton { background-color: #2196F3; color: white; padding: 6px 12px; "
@@ -258,21 +276,61 @@ class PointCloudViewer(
         self.save_bboxes_btn.clicked.connect(self._save_bboxes_clicked)
         self.save_bboxes_btn.hide()
 
+        self.bbox_attr_panel = BboxAttributePanel(self.glwidget)
+        self.bbox_attr_panel.attrSettingsRequested.connect(self._open_bbox_attr_settings)
+        self.bbox_attr_panel.hide()
+
     def _update_save_button_geometry(self):
-        """将 Save 按钮置于主视图右上角"""
+        """将主视图右上角标注操作按钮定位。"""
         if self.glwidget.width() <= 0 or self.glwidget.height() <= 0:
             return
         m = 12
-        bw = max(self.save_bboxes_btn.sizeHint().width(), 70)
-        bh = max(self.save_bboxes_btn.sizeHint().height(), 28)
+        gap = 8
+        save_w = max(self.save_bboxes_btn.sizeHint().width(), 70)
+        copy_w = max(self.copy_prev_bboxes_btn.sizeHint().width(), 100)
+        bh = max(self.save_bboxes_btn.sizeHint().height(), self.copy_prev_bboxes_btn.sizeHint().height(), 28)
         self.save_bboxes_btn.setGeometry(
-            self.glwidget.width() - bw - m, m, bw, bh
+            self.glwidget.width() - save_w - m, m, save_w, bh
         )
+        self.copy_prev_bboxes_btn.setGeometry(
+            self.glwidget.width() - save_w - copy_w - gap - m, m, copy_w, bh
+        )
+        self.copy_prev_bboxes_btn.setEnabled(self.current_frame_index > 0 and bool(getattr(self, "point_cloud_files", [])))
+        if getattr(self, "pcd_file", None):
+            self.copy_prev_bboxes_btn.show()
+            self.copy_prev_bboxes_btn.raise_()
         self.save_bboxes_btn.raise_()
+
+    def _update_bbox_attr_panel_geometry(self):
+        if not hasattr(self, "bbox_attr_panel") or self.glwidget.width() <= 0 or self.glwidget.height() <= 0:
+            return
+        margin = 16
+        panel_w = min(430, max(360, int(self.glwidget.width() * 0.21)))
+        preferred_h = self.bbox_attr_panel.preferred_height() if hasattr(self.bbox_attr_panel, "preferred_height") else self.bbox_attr_panel.sizeHint().height()
+        panel_h = max(preferred_h + 8, 170)
+        panel_h = min(panel_h, max(170, self.glwidget.height() - margin * 2))
+        x = max(margin, self.glwidget.width() - panel_w - margin)
+        y = max(margin, self.glwidget.height() - panel_h - margin)
+        self.bbox_attr_panel.setGeometry(x, y, panel_w, panel_h)
+        self.bbox_attr_panel.raise_()
+
+    def _show_bbox_attr_panel(self, bbox_index, info):
+        if not hasattr(self, "bbox_attr_panel"):
+            return
+        self.bbox_attr_panel.update_bbox(
+            info,
+            bbox_index=bbox_index,
+            on_bbox_edited=self._on_bbox_edited_from_panel,
+            class_names=list(self.class_map.keys()),
+            attr_defs=self.bbox_attr_defs,
+        )
+        self._update_bbox_attr_panel_geometry()
+        self.bbox_attr_panel.show()
+        self.bbox_attr_panel.raise_()
 
     def _show_save_button_if_modified(self):
         """若框已修改且有可保存的 JSON 路径，则显示 Save 按钮"""
-        if self.bbox_modified and hasattr(self, "json_path") and self.json_path and hasattr(self, "bboxes_directory") and self.bboxes_directory:
+        if self.bbox_modified and getattr(self, "pcd_file", None):
             self._update_save_button_geometry()
             self.save_bboxes_btn.show()
             self.save_bboxes_btn.raise_()
@@ -380,6 +438,9 @@ class PointCloudViewer(
             "多雷达外参标定", "icons/extrinsic_calib.svg", self._toggle_extrinsic_calib
         )
         self._extrinsic_calib_menu_action.setCheckable(True)
+        self._bbox_attr_settings_action = self.create_action(
+            "目标框属性设置", "icons/add_bbox.svg", self._open_bbox_attr_settings
+        )
         self.save_view_action = self.create_action("Save View", 'icons/save_view.svg', self.save_view)
         self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
 
@@ -391,8 +452,150 @@ class PointCloudViewer(
         tool_menu.addAction(self._mask_settings_action)
         tool_menu.addAction(self._cluster_params_action)
         tool_menu.addAction(self._extrinsic_calib_menu_action)
+        tool_menu.addAction(self._bbox_attr_settings_action)
         tool_menu.addAction(self.save_view_action)
         tool_menu.addAction(self.load_view_action)
+
+    def _bbox_attr_config_path(self):
+        return Path.home() / ".pcdview_bbox_attrs.json"
+
+    def _default_bbox_attr_defs(self):
+        class_options = list(self.class_map.keys()) if hasattr(self, "class_map") else ["others"]
+        return [
+            {"key": "class_name", "name": "类别", "label": "类别", "type": "select", "options": class_options, "system": True, "allow_empty": False, "default": "others"},
+            {"key": "id", "name": "ID", "label": "ID", "type": "text", "options": [], "system": True, "allow_empty": True},
+            {"key": "link_id", "name": "关联 ID", "label": "关联 ID", "type": "text", "options": [], "system": True, "allow_empty": True},
+            {"key": "confidence", "name": "置信度", "label": "置信度", "type": "check", "options": ["0", "1", "2"], "system": True, "multi": False, "allow_empty": True},
+            {"key": "movement_state", "name": "运动状态", "label": "运动状态", "type": "check", "options": ["0", "1"], "system": True, "multi": False, "allow_empty": True},
+        ]
+
+    def _load_bbox_attr_defs(self):
+        defaults = self._default_bbox_attr_defs()
+        path = self._bbox_attr_config_path()
+        if not path.is_file():
+            return defaults
+        try:
+            with open(path, "r", encoding="UTF-8") as f:
+                data = json.load(f)
+        except Exception:
+            return defaults
+        attr_defs = data.get("attributes", data) if isinstance(data, dict) else data
+        if not isinstance(attr_defs, list):
+            return defaults
+        cleaned = []
+        default_by_key = {item["key"]: item for item in defaults}
+        for item in attr_defs:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or item.get("name") or "").strip()
+            name = str(item.get("name") or item.get("label") or key).strip()
+            attr_type = item.get("type") if item.get("type") in ("select", "check", "text") else "text"
+            options = [str(v).strip() for v in (item.get("options") or []) if str(v).strip()]
+            if key and name:
+                cleaned_item = {"key": key, "name": name, "label": name, "type": attr_type, "options": options}
+                if key in default_by_key or item.get("system"):
+                    cleaned_item["system"] = True
+                if not options and key in default_by_key:
+                    cleaned_item["options"] = list(default_by_key[key].get("options") or [])
+                cleaned_item["allow_empty"] = bool(item.get("allow_empty", default_by_key.get(key, {}).get("allow_empty", True)))
+                if "default" in item:
+                    cleaned_item["default"] = item.get("default")
+                if attr_type == "check" and (item.get("multi") is False or default_by_key.get(key, {}).get("multi") is False):
+                    cleaned_item["multi"] = False
+                cleaned.append(cleaned_item)
+        existing = {item["key"] for item in cleaned}
+        missing_defaults = [item for item in defaults if item["key"] not in existing]
+        return missing_defaults + cleaned
+
+    def _save_bbox_attr_defs(self):
+        path = self._bbox_attr_config_path()
+        with open(path, "w", encoding="UTF-8") as f:
+            json.dump({"attributes": self.bbox_attr_defs}, f, indent=2, ensure_ascii=False)
+
+    def _open_bbox_attr_settings(self):
+        dialog = BboxAttrSettingsDialog(self.bbox_attr_defs, None)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self.bbox_attr_defs = dialog.attr_defs()
+        try:
+            self._save_bbox_attr_defs()
+        except Exception as exc:
+            QMessageBox.warning(self, "属性设置", "保存属性配置失败: {}".format(exc))
+        if hasattr(self, "bbox_attr_panel"):
+            self._prune_bbox_attr_infos()
+            if self.current_bbox_infos:
+                self.bbox_modified = True
+                self._show_save_button_if_modified()
+            self.bbox_attr_panel.set_attr_defs(self.bbox_attr_defs)
+            if self.selected_bbox_index is not None and self.selected_bbox_index < len(self.current_bbox_infos):
+                self._show_bbox_attr_panel(self.selected_bbox_index, self.current_bbox_infos[self.selected_bbox_index])
+
+    def _parse_bbox_attr_default(self, attr_def):
+        if "default" not in attr_def:
+            if attr_def.get("key") == "class_name":
+                return "others"
+            if not attr_def.get("allow_empty", True) and attr_def.get("options"):
+                value = attr_def["options"][0]
+                if attr_def.get("key") in ("confidence", "movement_state"):
+                    try:
+                        return int(value)
+                    except (TypeError, ValueError):
+                        return None
+                return value
+            return None
+        value = attr_def.get("default")
+        if value in ("", None):
+            return None
+        key = attr_def.get("key")
+        attr_type = attr_def.get("type")
+        if key in ("confidence", "movement_state"):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        if key in ("id", "link_id"):
+            text = str(value).strip()
+            if not text:
+                return None
+            if key == "link_id":
+                vals = []
+                for part in text.replace(";", ",").split(","):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    try:
+                        vals.append(int(part))
+                    except ValueError:
+                        vals.append(part)
+                return vals[0] if len(vals) == 1 else (vals or None)
+            try:
+                return int(text)
+            except ValueError:
+                return text
+        if attr_type == "check" and isinstance(value, (list, tuple)):
+            return list(value) or None
+        return str(value)
+
+    def _default_bbox_attr_values(self):
+        values = {}
+        for attr_def in self.bbox_attr_defs:
+            key = attr_def.get("key") or attr_def.get("name")
+            if key:
+                values[key] = self._parse_bbox_attr_default(attr_def)
+        values["class_name"] = values.get("class_name") or "others"
+        return values
+
+    def _prune_bbox_attr_infos(self):
+        keep = {
+            "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
+            "class_name", "id", "link_id", "confidence", "movement_state",
+        }
+        keep.update(attr_def.get("key") or attr_def.get("name") for attr_def in self.bbox_attr_defs)
+        keep.discard(None)
+        for info in self.current_bbox_infos:
+            for key in list(info.keys()):
+                if key not in keep:
+                    info[key] = None
 
     def create_action(self, name, icon_path, handler):
         icon = QIcon(os.path.join(self.curpath, icon_path))
@@ -407,6 +610,7 @@ class PointCloudViewer(
         if event.type() == QEvent.Resize:
             self.box_select_overlay.setGeometry(0, 0, self.glwidget.width(), self.glwidget.height())
             self._update_save_button_geometry()
+            self._update_bbox_attr_panel_geometry()
 
         # 只有鼠标相关事件才有 pos()/button() 等信息；否则（例如 QPaintEvent/QHideEvent）
         # 会导致 event.pos() AttributeError。
@@ -467,6 +671,24 @@ class PointCloudViewer(
                 return True
             return super().eventFilter(obj, event)
 
+        if self._bbox_drag_state is not None:
+            if event.type() == QEvent.MouseMove and event.buttons() & Qt.LeftButton:
+                self._update_bbox_drag(mx, my)
+                return True
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                self._finish_bbox_drag()
+                return True
+
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton and self.current_bbox_infos:
+            try:
+                idx = pick_bbox_index(self.glwidget, mx, my, self.current_bbox_infos)
+                if idx is not None:
+                    self._show_bbox_info_dialog(idx)
+                    self._start_bbox_drag(idx, mx, my)
+                    return True
+            except Exception as e:
+                print("bbox drag start error:", e)
+
         if event.type() == QEvent.MouseButtonRelease and self._cluster_bbox_infos:
             try:
                 cidx = pick_bbox_index(self.glwidget, mx, my, self._cluster_bbox_infos)
@@ -489,6 +711,78 @@ class PointCloudViewer(
                 print("bbox pick error:", e)
         return super().eventFilter(obj, event)
 
+    def _start_bbox_drag(self, bbox_index, mx, my):
+        if bbox_index < 0 or bbox_index >= len(self.current_bbox_infos):
+            self._bbox_drag_state = None
+            return
+        info = self.current_bbox_infos[bbox_index]
+        z_plane = float(info.get("z", 0.0))
+        ray = ray_from_screen(self.glwidget, mx, my)
+        start_pt = ray_plane_z_intersect(ray[0], ray[1], z_plane) if ray is not None else None
+        if start_pt is None:
+            self._bbox_drag_state = None
+            return
+        self._bbox_drag_state = {
+            "idx": bbox_index,
+            "start_screen": (float(mx), float(my)),
+            "start_pt": start_pt,
+            "z_plane": z_plane,
+            "orig_center": (
+                float(info.get("x", 0.0)),
+                float(info.get("y", 0.0)),
+                float(info.get("z", 0.0)),
+            ),
+            "moved": False,
+        }
+        self.glwidget.setCursor(Qt.ClosedHandCursor)
+
+    def _update_bbox_drag(self, mx, my):
+        state = self._bbox_drag_state
+        if not state:
+            return
+        idx = state["idx"]
+        if idx < 0 or idx >= len(self.current_bbox_infos):
+            self._bbox_drag_state = None
+            self.glwidget.unsetCursor()
+            return
+        sx, sy = state["start_screen"]
+        if not state["moved"] and abs(mx - sx) < 3 and abs(my - sy) < 3:
+            return
+        ray = ray_from_screen(self.glwidget, mx, my)
+        cur_pt = ray_plane_z_intersect(ray[0], ray[1], state["z_plane"]) if ray is not None else None
+        if cur_pt is None:
+            return
+        delta = cur_pt - state["start_pt"]
+        ox, oy, oz = state["orig_center"]
+        info = self.current_bbox_infos[idx]
+        info["x"] = float(ox + delta[0])
+        info["y"] = float(oy + delta[1])
+        info["z"] = float(oz)
+        state["moved"] = True
+        self._refresh_single_bbox_in_main_view(idx)
+        self._rebuild_link_arrows()
+
+    def _finish_bbox_drag(self):
+        state = self._bbox_drag_state
+        self._bbox_drag_state = None
+        self.glwidget.unsetCursor()
+        if not state or not state.get("moved"):
+            return
+        idx = state["idx"]
+        if idx < 0 or idx >= len(self.current_bbox_infos):
+            return
+        self.bbox_modified = True
+        self._show_save_button_if_modified()
+        if self.bbox_three_views_panel.isVisible() and hasattr(self, "raw_points") and self.raw_points is not None:
+            self.bbox_three_views_panel.update_bbox(
+                self.raw_points[:, :3],
+                self.current_bbox_infos[idx],
+                bbox_index=idx,
+                on_bbox_edited=self._on_bbox_edited_from_panel,
+                class_names=list(self.class_map.keys()),
+            )
+        self._show_bbox_attr_panel(idx, self.current_bbox_infos[idx])
+
     def _show_bbox_info_popup(self, bbox_index):
         """右键单击时弹出目标框信息窗口"""
         info = self.current_bbox_infos[bbox_index]
@@ -510,6 +804,10 @@ class PointCloudViewer(
             lines.append("Yaw: {:.1f}°".format(np.rad2deg(float(yaw))))
         if "link_id" in info:
             lines.append("link_id: {}".format(info["link_id"] if info["link_id"] is not None else "-"))
+        if "confidence" in info:
+            lines.append("confidence: {}".format(info["confidence"] if info["confidence"] is not None else "-"))
+        if "movement_state" in info:
+            lines.append("movement_state: {}".format(info["movement_state"] if info["movement_state"] is not None else "-"))
         text = "\n".join(lines) if lines else "无信息"
         QMessageBox.information(self, "目标框信息", text)
 
@@ -524,11 +822,13 @@ class PointCloudViewer(
                 xyz, info,
                 bbox_index=bbox_index,
                 on_bbox_edited=self._on_bbox_edited_from_panel,
+                class_names=list(self.class_map.keys()),
             )
             self.bbox_three_views_panel.show()
             self.bbox_three_views_panel.setMinimumWidth(320)
             total = self.splitter.width()
             self.splitter.setSizes([max(400, total - 380), 380])
+            self._show_bbox_attr_panel(bbox_index, info)
 
     def _on_bbox_edited_from_panel(self, bbox_index, new_info):
         """三视图中拖动修改框后，同步更新 current_bbox_infos 与主 3D 视图中该框的显示"""
@@ -539,6 +839,31 @@ class PointCloudViewer(
         self._rebuild_link_arrows()  # 实时更新 link_id 弧线（中心点或尺寸变化会影响弧线起止点）
         self.bbox_modified = True
         self._show_save_button_if_modified()
+
+    def _rotate_selected_bbox_yaw_90(self):
+        if self.selected_bbox_index is None:
+            self.frame_info_label.setText("请先选中一个目标框")
+            return
+        idx = self.selected_bbox_index
+        if idx < 0 or idx >= len(self.current_bbox_infos):
+            return
+        info = self.current_bbox_infos[idx]
+        yaw = float(info.get("yaw", 0.0)) + np.pi / 2.0
+        info["yaw"] = float((yaw + np.pi) % (2.0 * np.pi) - np.pi)
+        self._refresh_single_bbox_in_main_view(idx)
+        self._rebuild_link_arrows()
+        if self.bbox_three_views_panel.isVisible() and hasattr(self, "raw_points") and self.raw_points is not None:
+            self.bbox_three_views_panel.update_bbox(
+                self.raw_points[:, :3],
+                info,
+                bbox_index=idx,
+                on_bbox_edited=self._on_bbox_edited_from_panel,
+                class_names=list(self.class_map.keys()),
+            )
+        self._show_bbox_attr_panel(idx, info)
+        self.bbox_modified = True
+        self._show_save_button_if_modified()
+        self.frame_info_label.setText("已将目标框 yaw 旋转 90 度")
 
     def _refresh_bbox_selection_style(self):
         """根据 selected_bbox_index 刷新所有框的显示样式：选中为全包围半透明实体，未选中为线框"""
@@ -595,6 +920,9 @@ class PointCloudViewer(
         """三视图面板关闭时清除选中高亮"""
         self.selected_bbox_index = None
         self._refresh_bbox_selection_style()
+        if hasattr(self, "bbox_attr_panel"):
+            self.bbox_attr_panel.clear_bbox()
+            self.bbox_attr_panel.hide()
 
     def _delete_selected_bbox(self):
         """Backspace 删除当前选中的目标框"""
@@ -616,6 +944,9 @@ class PointCloudViewer(
         elif getattr(self.bbox_three_views_panel, "_bbox_index", None) is not None and self.bbox_three_views_panel._bbox_index > idx:
             self.bbox_three_views_panel._bbox_index -= 1
         self._rebuild_link_arrows()
+        if hasattr(self, "bbox_attr_panel"):
+            self.bbox_attr_panel.clear_bbox()
+            self.bbox_attr_panel.hide()
         self._update_frame_info_label()
         self.bbox_modified = True
         self._show_save_button_if_modified()
@@ -664,7 +995,8 @@ class PointCloudViewer(
 
     def _append_bbox(self, x_c, y_c, z_c, l, w, h, yaw):
         """将拟合好的框追加到列表"""
-        class_name = "others"
+        default_attrs = self._default_bbox_attr_values()
+        class_name = default_attrs.get("class_name") or "others"
         if class_name in self.class_map.keys():
             bbox_color = self.class_map[class_name]
         else:
@@ -677,22 +1009,37 @@ class PointCloudViewer(
         self.glwidget.addItem(arrow)
         self.glwidget.addItem(vis_text)
         self.current_bbox_items.extend([bbox, arrow, vis_text])
-        info = {"x": x_c, "y": y_c, "z": z_c, "l": l, "w": w, "h": h, "yaw": yaw, "roll": 0.0, "pitch": 0.0, "class_name": class_name}
+        info = {
+            "x": x_c, "y": y_c, "z": z_c,
+            "l": l, "w": w, "h": h,
+            "yaw": yaw, "roll": 0.0, "pitch": 0.0,
+            "class_name": class_name,
+            "confidence": None,
+            "movement_state": None,
+        }
+        info.update(default_attrs)
         self.current_bbox_infos.append(info)
+        self.selected_bbox_index = len(self.current_bbox_infos) - 1
+        self._refresh_bbox_selection_style()
         self.box_select_mode = False
         self.box_select_action.setChecked(False)
+        self._show_bbox_info_dialog(self.selected_bbox_index)
+        if (not self.bbox_three_views_panel.isVisible() or
+                getattr(self.bbox_three_views_panel, "_bbox_index", None) != self.selected_bbox_index):
+            self._show_bbox_attr_panel(self.selected_bbox_index, info)
         self.frame_info_label.setText(f"已添加新框，共 {len(self.current_bbox_infos)} 个")
         self.bbox_modified = True
         self._show_save_button_if_modified()
 
     def _save_bboxes_clicked(self):
         """将修改后的框保存到原 JSON 文件"""
-        if not hasattr(self, "json_path") or not self.json_path:
-            self.frame_info_label.setText("无可保存的 JSON 路径")
-            return
-        if not self.current_bbox_infos:
-            self.frame_info_label.setText("无目标框可保存")
-            return
+        self._save_current_bboxes(show_message=True)
+
+    def _save_current_bboxes(self, show_message=False):
+        """保存当前帧 bbox；返回是否保存成功。"""
+        if not self._ensure_bbox_save_path():
+            self.frame_info_label.setText("已取消选择目标框保存地址")
+            return False
         try:
             save_bboxes_to_tanway_json(
                 self.json_path,
@@ -701,10 +1048,149 @@ class PointCloudViewer(
             )
             self.bbox_modified = False
             self.save_bboxes_btn.hide()
+            if hasattr(self, "bbox_attr_panel"):
+                self.bbox_attr_panel.raise_()
             self.frame_info_label.setText(f"已保存到 {os.path.basename(self.json_path)}")
+            return True
         except Exception as e:
             self.frame_info_label.setText(f"保存失败: {e}")
-            QMessageBox.warning(self, "保存失败", str(e))
+            if show_message:
+                QMessageBox.warning(self, "保存失败", str(e))
+            return False
+
+    def _ensure_bbox_save_path(self):
+        if hasattr(self, "json_path") and self.json_path:
+            return True
+        if not getattr(self, "pcd_file", None):
+            QMessageBox.warning(self, "保存失败", "当前没有点云文件，无法生成目标框文件名")
+            return False
+        directory = QFileDialog.getExistingDirectory(self, "选择目标框保存地址")
+        if not directory:
+            return False
+        self.bboxes_directory = directory
+        self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem) + ".json")
+        self.original_json_agents = load_json(self.json_path) if os.path.isfile(self.json_path) else None
+        self.frame_info_label.setText(f"目标框将保存到 {os.path.basename(self.json_path)}")
+        return True
+
+    def _ensure_bboxes_directory(self):
+        if getattr(self, "bboxes_directory", None):
+            return True
+        directory = QFileDialog.getExistingDirectory(self, "选择目标框保存地址")
+        if not directory:
+            return False
+        self.bboxes_directory = directory
+        if getattr(self, "pcd_file", None):
+            self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem) + ".json")
+            self.original_json_agents = load_json(self.json_path) if os.path.isfile(self.json_path) else None
+        return True
+
+    def _bbox_infos_from_agents(self, agents):
+        json_data = get_anno_from_tanway_json(agents)
+        infos = []
+        for i, box in enumerate(json_data["bboxes"]):
+            x, y, z, l, w, h, yaw = box
+            class_name = json_data["className"][i]
+            class_name = class_name.replace("TYPE_", "") if "TYPE_" in class_name else class_name
+            info = {
+                "x": x, "y": y, "z": z,
+                "l": l, "w": w, "h": h,
+                "yaw": yaw,
+                "class_name": class_name,
+            }
+            if "tag" in json_data and i < len(json_data["tag"]) and isinstance(json_data["tag"][i], dict):
+                reserved_tag_keys = {"link_id", "link_ID", "confidence", "movement_state"}
+                for key, value in json_data["tag"][i].items():
+                    if key not in reserved_tag_keys:
+                        info[key] = value
+            if "confidence" in json_data and i < len(json_data["confidence"]):
+                info["confidence"] = json_data["confidence"][i]
+            if "id" in json_data and i < len(json_data["id"]):
+                info["id"] = json_data["id"][i]
+            if "movement_state" in json_data and i < len(json_data["movement_state"]):
+                info["movement_state"] = json_data["movement_state"][i]
+            if "link_id" in json_data and i < len(json_data["link_id"]):
+                info["link_id"] = json_data["link_id"][i]
+            if "pitch" in json_data and i < len(json_data["pitch"]):
+                info["pitch"] = json_data["pitch"][i]
+            if "numPoints" in json_data and i < len(json_data["numPoints"]):
+                info["numPoints"] = json_data["numPoints"][i]
+            infos.append(info)
+        return infos
+
+    def _clear_bbox_visual_items(self):
+        for item in self.current_bbox_items:
+            self.glwidget.removeItem(item)
+        for item in getattr(self, "current_link_arrows", []):
+            self.glwidget.removeItem(item)
+        self.current_bbox_items = []
+        self.current_link_arrows = []
+
+    def _redraw_current_bboxes(self):
+        self._clear_bbox_visual_items()
+        for info in self.current_bbox_infos:
+            x, y, z = info["x"], info["y"], info["z"]
+            l, w, h = info["l"], info["w"], info["h"]
+            yaw = info["yaw"]
+            class_name = info.get("class_name", "")
+            bbox_color = self.class_map[class_name] if class_name in self.class_map.keys() else self.class_map["others"]
+            color = QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
+            bbox = draw_bbox(x, y, z, l, w, h, yaw, color)
+            arrow = draw_arrow(np.array([x, y, z+h/2]), direction=[np.cos(yaw), np.sin(yaw), 0], length=l/2, color=color)
+            str_id = str(info.get("id", "")) if info.get("id") is not None else "XX"
+            vis_text = GLTextItem(text=class_name + "-" + str_id, pos=(x, y, z+1), color=color, font=QFont('Helvetica', 10))
+            self.glwidget.addItem(bbox)
+            self.glwidget.addItem(arrow)
+            self.glwidget.addItem(vis_text)
+            self.current_bbox_items.extend([bbox, arrow, vis_text])
+        self.selected_bbox_index = None
+        self._rebuild_link_arrows()
+        if hasattr(self, "bbox_attr_panel"):
+            self.bbox_attr_panel.clear_bbox()
+            self.bbox_attr_panel.hide()
+
+    def _copy_previous_frame_bboxes(self):
+        if not getattr(self, "point_cloud_files", None) or self.current_frame_index <= 0:
+            self.frame_info_label.setText("当前没有上一帧可复制")
+            return
+        if self.current_bbox_infos:
+            ret = QMessageBox.question(
+                self,
+                "复制上一帧标注",
+                "当前帧已有目标框，是否用上一帧标注覆盖当前帧？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ret != QMessageBox.Yes:
+                return
+        if not self._ensure_bboxes_directory():
+            self.frame_info_label.setText("已取消选择目标框保存地址")
+            return
+        prev_pcd = self.point_cloud_files[self.current_frame_index - 1]
+        prev_json_path = os.path.join(str(self.bboxes_directory), str(Path(prev_pcd).stem) + ".json")
+        if not os.path.isfile(prev_json_path):
+            QMessageBox.warning(self, "复制失败", f"上一帧标注文件不存在:\n{prev_json_path}")
+            return
+        try:
+            prev_agents = load_json(prev_json_path)
+            self.current_bbox_infos = self._bbox_infos_from_agents(prev_agents)
+            self.original_json_agents = load_json(self.json_path) if self.json_path and os.path.isfile(self.json_path) else None
+            self._redraw_current_bboxes()
+            self.bbox_modified = True
+            self._show_save_button_if_modified()
+            self.frame_info_label.setText(f"已复制上一帧标注，共 {len(self.current_bbox_infos)} 个框")
+        except Exception as e:
+            QMessageBox.warning(self, "复制失败", str(e))
+
+    def _save_current_bboxes_if_modified(self):
+        if not getattr(self, "bbox_modified", False):
+            return True
+        ok = self._save_current_bboxes(show_message=True)
+        if not ok:
+            self.timer.stop()
+            self.playing = False
+            self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
+        return ok
 
     def _add_bbox_from_rect_empty(self, x_min, x_max, y_min, y_max):
         """框选区域无点时，将屏幕矩形四角投影到地面生成轴对齐框"""
@@ -882,6 +1368,7 @@ class PointCloudViewer(
         self.frame_info_label.setText(
             f"Frame: {self.current_frame_index + 1} / {len(self.point_cloud_files)} ({self.point_cloud_files[self.current_frame_index]})")
         self.frame_slider.setValue(self.current_frame_index)
+        self._update_save_button_geometry()
 
         elapsed1_time = (end1_time - start_time) * 1000  # Calculate time in milliseconds
         print(f"Code execution time: {elapsed1_time:.3f} ms", id)
@@ -899,20 +1386,31 @@ class PointCloudViewer(
 
     def previous_frame(self):
         if self.current_frame_index > 0:
-            self.current_frame_index -= 1
-            self.load_frame()
+            self._change_frame(self.current_frame_index - 1)
 
     def next_frame(self):
         if self.current_frame_index < len(self.point_cloud_files) - 1:
-            self.current_frame_index += 1
-            self.frame_slider.blockSignals(True)  # Block slider signals
-            self.frame_slider.setValue(self.current_frame_index)  # Update slider position
-            self.frame_slider.blockSignals(False)  # Re-enable signals
-            self.load_frame()
+            self._change_frame(self.current_frame_index + 1)
         else:
             self.timer.stop()
             self.playing = False
             self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
+
+    def _change_frame(self, target_index):
+        if target_index == self.current_frame_index:
+            return
+        if target_index < 0 or target_index >= len(self.point_cloud_files):
+            return
+        if not self._save_current_bboxes_if_modified():
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setValue(self.current_frame_index)
+            self.frame_slider.blockSignals(False)
+            return
+        self.current_frame_index = target_index
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(self.current_frame_index)
+        self.frame_slider.blockSignals(False)
+        self.load_frame()
 
     def toggle_play_pause(self):
         if self.playing:
@@ -926,8 +1424,7 @@ class PointCloudViewer(
     def on_slider_value_changed(self):
         print("--on_slider_value_changed")
         if self.current_frame_index != self.frame_slider.value() and self.directory is not None:
-            self.current_frame_index = self.frame_slider.value()
-            self.load_frame()
+            self._change_frame(self.frame_slider.value())
         else:
             print("single")
 
@@ -1020,6 +1517,10 @@ class PointCloudViewer(
         self.selected_bbox_index = None
         self.bbox_modified = False
         self.save_bboxes_btn.hide()
+        self._update_save_button_geometry()
+        if hasattr(self, "bbox_attr_panel"):
+            self.bbox_attr_panel.clear_bbox()
+            self.bbox_attr_panel.hide()
         self._clear_cluster_bboxes()
         if self.bboxes_directory is not None:
             self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem)+".json")
@@ -1059,6 +1560,11 @@ class PointCloudViewer(
 
                     # 保存该框信息，供点击拾取时弹窗显示
                     info = {"x": x, "y": y, "z": z, "l": l, "w": w, "h": h, "yaw": yaw, "class_name": class_name}
+                    if "tag" in json_data and i < len(json_data["tag"]) and isinstance(json_data["tag"][i], dict):
+                        reserved_tag_keys = {"link_id", "link_ID", "confidence", "movement_state"}
+                        for key, value in json_data["tag"][i].items():
+                            if key not in reserved_tag_keys:
+                                info[key] = value
                     if "confidence" in json_data and i < len(json_data["confidence"]):
                         info["confidence"] = json_data["confidence"][i]
                     if "id" in json_data and i < len(json_data["id"]):
@@ -1128,9 +1634,14 @@ class PointCloudViewer(
                     self.current_bbox_infos[idx],
                     bbox_index=idx,
                     on_bbox_edited=self._on_bbox_edited_from_panel,
+                    class_names=list(self.class_map.keys()),
                 )
+                self._show_bbox_attr_panel(idx, self.current_bbox_infos[idx])
             else:
                 self.bbox_three_views_panel.hide()
+                if hasattr(self, "bbox_attr_panel"):
+                    self.bbox_attr_panel.clear_bbox()
+                    self.bbox_attr_panel.hide()
 
         # GLViewWidget.removeItem 在 item 不存在于其 internal list 时会抛 ValueError，
         # 例如 Mask 设置界面实时回调过程中 vis_fram 被多次触发。

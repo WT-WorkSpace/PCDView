@@ -173,7 +173,7 @@ class BboxThreeViewsPanel(QWidget):
     def _on_close(self):
         self.hide()
 
-    def update_bbox(self, raw_points_xyz, bbox_info, bbox_index=None, on_bbox_edited=None):
+    def update_bbox(self, raw_points_xyz, bbox_info, bbox_index=None, on_bbox_edited=None, class_names=None):
         """
         根据当前帧点云与选中的 bbox_info 更新三视图，并支持拖动调整尺寸与 BEV 旋转 yaw。
         on_bbox_edited(bbox_index, new_bbox_info) 在编辑时被调用以同步主 3D 视图。
