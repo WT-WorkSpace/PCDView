@@ -19,12 +19,18 @@ import matplotlib.pyplot as plt
 
 # 视图半径 = 框在该视图的最大半尺寸 * 此系数，使框在图中占比与参考图类似（约 2/3）
 VIEW_BOX_RATIO = 0.75
+# 三视图只显示目标框附近点：在 bbox 外额外保留的上下文范围（米）
+VIEW_CONTEXT_MARGIN = 0.5
+VIEW_CONTEXT_RATIO = 0.25
+VIEW_MIN_RADIUS = 0.8
 # 拖动检测：与边/手柄的距离小于该值（米）即视为命中
 HIT_THRESHOLD = 0.15
 # BEV 旋转手柄长度（米）
 YAW_HANDLE_LEN = 0.4
 MIN_SIZE = 0.2
 MAX_SIZE = 50.0
+# 三视图拖动边缘改尺寸的灵敏度；越小越细，1.0 为原始跟手速度。
+RESIZE_DRAG_SENSITIVITY = 0.8
 
 # 三视图浅色主题
 FIG_FACECOLOR = "#e4e8ec"
@@ -77,6 +83,32 @@ def points_in_bbox_local(raw_points_xyz, cx, cy, cz, l, w, h, yaw):
     half = np.array([l / 2, w / 2, h / 2])
     mask = np.all(np.abs(local) <= half + 1e-6, axis=1)
     return local, mask
+
+
+def nearby_points_for_views(local_pts, l, w, h):
+    """只保留目标框周围的局部点，避免三视图显示远处点。"""
+    if local_pts is None or len(local_pts) == 0:
+        return np.array([], dtype=bool), VIEW_MIN_RADIUS, VIEW_MIN_RADIUS, VIEW_MIN_RADIUS
+    x_limit, y_limit, z_limit = nearby_view_limits(l, w, h)
+    near_mask = (
+        (np.abs(local_pts[:, 0]) <= x_limit) &
+        (np.abs(local_pts[:, 1]) <= y_limit) &
+        (np.abs(local_pts[:, 2]) <= z_limit)
+    )
+    r_bev = max(x_limit, y_limit, VIEW_MIN_RADIUS)
+    r_side = max(x_limit, z_limit, VIEW_MIN_RADIUS)
+    r_rear = max(y_limit, z_limit, VIEW_MIN_RADIUS)
+    return near_mask, r_bev, r_side, r_rear
+
+
+def nearby_view_limits(l, w, h):
+    """目标框附近场景的局部坐标范围。"""
+    context = max(VIEW_CONTEXT_MARGIN, max(l, w, h) * VIEW_CONTEXT_RATIO)
+    half_l, half_w, half_h = l / 2, w / 2, h / 2
+    x_limit = half_l + context
+    y_limit = half_w + context
+    z_limit = half_h + context
+    return x_limit, y_limit, z_limit
 
 
 class _SquareCanvasWrapper(QWidget):
@@ -194,19 +226,18 @@ class BboxThreeViewsPanel(QWidget):
         roll = _safe_float(bbox_info.get("roll"))
 
         local_pts, mask = points_in_bbox_local(raw_points_xyz, x, y, z, l, w, h, yaw)
-        # 视图半径：框居中，框大小在图中占比与参考图类似
-        r_bev = max(l, w) * VIEW_BOX_RATIO
-        r_side = max(l, h) * VIEW_BOX_RATIO
-        r_rear = max(w, h) * VIEW_BOX_RATIO
-        # 只显示落在任一视图范围内的点（不按固定距离截断），充满可视化区域
+        # BEV 恢复原来的俯视范围；侧视图/后视图只显示目标框三维邻域内的点。
+        r_bev = max(max(l, w) * VIEW_BOX_RATIO, VIEW_MIN_RADIUS)
+        near_mask, _, r_side, r_rear = nearby_points_for_views(local_pts, l, w, h)
         in_bev = (np.abs(local_pts[:, 0]) <= r_bev) & (np.abs(local_pts[:, 1]) <= r_bev)
-        in_side = (np.abs(local_pts[:, 0]) <= r_side) & (np.abs(local_pts[:, 2]) <= r_side)
-        in_rear = (np.abs(local_pts[:, 1]) <= r_rear) & (np.abs(local_pts[:, 2]) <= r_rear)
-        in_range = in_bev | in_side | in_rear
-        local_vis = local_pts[in_range]
-        mask_vis = mask[in_range]
-        inside = local_vis[mask_vis]
-        outside = local_vis[~mask_vis]
+        local_bev = local_pts[in_bev]
+        mask_bev = mask[in_bev]
+        inside_bev = local_bev[mask_bev]
+        outside_bev = local_bev[~mask_bev]
+        local_near = local_pts[near_mask]
+        mask_near = mask[near_mask]
+        inside = local_near[mask_near]
+        outside = local_near[~mask_near]
         margins = inner_margins_cm(inside, l, w, h) if len(inside) > 0 else None
         self._r_bev, self._r_side, self._r_rear = r_bev, r_side, r_rear
 
@@ -227,12 +258,12 @@ class BboxThreeViewsPanel(QWidget):
         # 显示坐标 display = (-local_y, local_x)，即图的上方为车头、框与主视图时刻一致
         fig_bev = Figure(figsize=(4, 4), facecolor=FIG_FACECOLOR)
         ax_bev = fig_bev.add_subplot(111, facecolor=AXES_FACECOLOR)
-        bev_x = -outside[:, 1]
-        bev_y = outside[:, 0]
-        s_out = ax_bev.scatter(bev_x, bev_y, s=2.5, c=SCATTER_OUT_COLOR, alpha=0.5, rasterized=True) if len(outside) > 0 else None
-        bev_xi = -inside[:, 1]
-        bev_yi = inside[:, 0]
-        s_in = ax_bev.scatter(bev_xi, bev_yi, s=4, c=SCATTER_IN_COLOR, alpha=0.9, rasterized=True) if len(inside) > 0 else None
+        bev_x = -outside_bev[:, 1]
+        bev_y = outside_bev[:, 0]
+        s_out = ax_bev.scatter(bev_x, bev_y, s=2.5, c=SCATTER_OUT_COLOR, alpha=0.5, rasterized=True)
+        bev_xi = -inside_bev[:, 1]
+        bev_yi = inside_bev[:, 0]
+        s_in = ax_bev.scatter(bev_xi, bev_yi, s=4, c=SCATTER_IN_COLOR, alpha=0.9, rasterized=True)
         # 旋转后：矩形在显示坐标中 xy=(-w/2,-l/2) 宽 w 高 l
         rect_bev = Rectangle((-w/2, -l/2), w, l, fill=False, edgecolor=EDGE_COLOR, linewidth=1.5)
         ax_bev.add_patch(rect_bev)
@@ -255,6 +286,7 @@ class BboxThreeViewsPanel(QWidget):
         canvas_bev.mpl_connect("button_press_event", self._bev_press)
         canvas_bev.mpl_connect("motion_notify_event", self._bev_motion)
         canvas_bev.mpl_connect("button_release_event", self._bev_release)
+        canvas_bev.mpl_connect("scroll_event", self._scroll_zoom)
         self._rect_bev = rect_bev
         self._yaw_handle_bev = yaw_handle
         self._ax_bev = ax_bev
@@ -275,8 +307,8 @@ class BboxThreeViewsPanel(QWidget):
         # 侧视图: 局部 XZ，四边可拖改 L/H，框内拖平移（正方形 fig 保证 L 水平、H 竖直与 3D 一致）
         fig_side = Figure(figsize=(4, 4), facecolor=FIG_FACECOLOR)
         ax_side = fig_side.add_subplot(111, facecolor=AXES_FACECOLOR)
-        s_side_out = ax_side.scatter(outside[:, 0], outside[:, 2], s=2.5, c=SCATTER_OUT_COLOR, alpha=0.5, rasterized=True) if len(outside) > 0 else None
-        s_side_in = ax_side.scatter(inside[:, 0], inside[:, 2], s=4, c=SCATTER_IN_COLOR, alpha=0.9, rasterized=True) if len(inside) > 0 else None
+        s_side_out = ax_side.scatter(outside[:, 0], outside[:, 2], s=2.5, c=SCATTER_OUT_COLOR, alpha=0.5, rasterized=True)
+        s_side_in = ax_side.scatter(inside[:, 0], inside[:, 2], s=4, c=SCATTER_IN_COLOR, alpha=0.9, rasterized=True)
         rect_side = Rectangle((-l/2, -h/2), l, h, fill=False, edgecolor=EDGE_COLOR, linewidth=1.5)
         ax_side.add_patch(rect_side)
         ax_side.set_aspect("equal")
@@ -289,6 +321,7 @@ class BboxThreeViewsPanel(QWidget):
         canvas_side.mpl_connect("button_press_event", self._side_press)
         canvas_side.mpl_connect("motion_notify_event", self._side_motion)
         canvas_side.mpl_connect("button_release_event", self._side_release)
+        canvas_side.mpl_connect("scroll_event", self._scroll_zoom)
         self._rect_side = rect_side
         self._ax_side = ax_side
         self._scatter_side_out = s_side_out
@@ -308,8 +341,8 @@ class BboxThreeViewsPanel(QWidget):
         # 后视图: 显示 (-local_y, local_z)，使图右=车右（局部 y 左为正，取反后图右=车右）
         fig_rear = Figure(figsize=(4, 4), facecolor=FIG_FACECOLOR)
         ax_rear = fig_rear.add_subplot(111, facecolor=AXES_FACECOLOR)
-        s_rear_out = ax_rear.scatter(-outside[:, 1], outside[:, 2], s=2.5, c=SCATTER_OUT_COLOR, alpha=0.5, rasterized=True) if len(outside) > 0 else None
-        s_rear_in = ax_rear.scatter(-inside[:, 1], inside[:, 2], s=4, c=SCATTER_IN_COLOR, alpha=0.9, rasterized=True) if len(inside) > 0 else None
+        s_rear_out = ax_rear.scatter(-outside[:, 1], outside[:, 2], s=2.5, c=SCATTER_OUT_COLOR, alpha=0.5, rasterized=True)
+        s_rear_in = ax_rear.scatter(-inside[:, 1], inside[:, 2], s=4, c=SCATTER_IN_COLOR, alpha=0.9, rasterized=True)
         rect_rear = Rectangle((-w/2, -h/2), w, h, fill=False, edgecolor=EDGE_COLOR, linewidth=1.5)
         ax_rear.add_patch(rect_rear)
         ax_rear.set_aspect("equal")
@@ -322,6 +355,7 @@ class BboxThreeViewsPanel(QWidget):
         canvas_rear.mpl_connect("button_press_event", self._rear_press)
         canvas_rear.mpl_connect("motion_notify_event", self._rear_motion)
         canvas_rear.mpl_connect("button_release_event", self._rear_release)
+        canvas_rear.mpl_connect("scroll_event", self._scroll_zoom)
         self._rect_rear = rect_rear
         self._ax_rear = ax_rear
         self._scatter_rear_out = s_rear_out
@@ -343,7 +377,11 @@ class BboxThreeViewsPanel(QWidget):
 
     def _emit_bbox_edited(self):
         if self._on_bbox_edited and self._bbox_index is not None:
-            self._on_bbox_edited(self._bbox_index, dict(self._bbox_info))
+            geometry_keys = ("x", "y", "z", "l", "w", "h", "yaw")
+            self._on_bbox_edited(
+                self._bbox_index,
+                {key: self._bbox_info[key] for key in geometry_keys if key in self._bbox_info},
+            )
 
     def _yaw_button_step(self, direction):
         """BEV 中 Yaw −/＋：三视图侧取反步进，使主窗口旋转方向与三视图操作一致。"""
@@ -352,7 +390,7 @@ class BboxThreeViewsPanel(QWidget):
         self._sync_rects()
         self._emit_bbox_edited()
 
-    def _sync_rects(self):
+    def _sync_rects(self, reset_limits=True):
         l = _safe_float(self._bbox_info.get("l"))
         w = _safe_float(self._bbox_info.get("w"))
         h = _safe_float(self._bbox_info.get("h"))
@@ -370,12 +408,12 @@ class BboxThreeViewsPanel(QWidget):
             self._rect_rear.set_xy((-w/2, -h/2))
             self._rect_rear.set_width(w)
             self._rect_rear.set_height(h)
-        self._update_scatter_points()
+        self._update_scatter_points(reset_limits=reset_limits)
         for c in (self.canvas_bev, self.canvas_side, self.canvas_rear):
             if c:
                 c.draw_idle()
 
-    def _update_scatter_points(self):
+    def _update_scatter_points(self, reset_limits=True):
         """根据当前 _bbox_info 的 center/yaw 重算局部点并更新三视图 scatter"""
         if not hasattr(self, "_raw_points_xyz") or self._raw_points_xyz is None or len(self._raw_points_xyz) == 0:
             return
@@ -387,34 +425,111 @@ class BboxThreeViewsPanel(QWidget):
         h = _safe_float(self._bbox_info.get("h"))
         yaw = _safe_float(self._bbox_info.get("yaw"))
         local_pts, mask = points_in_bbox_local(self._raw_points_xyz, x, y, z, l, w, h, yaw)
-        r_bev = getattr(self, "_r_bev", max(l, w) * VIEW_BOX_RATIO)
-        r_side = getattr(self, "_r_side", max(l, h) * VIEW_BOX_RATIO)
-        r_rear = getattr(self, "_r_rear", max(w, h) * VIEW_BOX_RATIO)
-        in_bev = (np.abs(local_pts[:, 0]) <= r_bev) & (np.abs(local_pts[:, 1]) <= r_bev)
-        in_side = (np.abs(local_pts[:, 0]) <= r_side) & (np.abs(local_pts[:, 2]) <= r_side)
-        in_rear = (np.abs(local_pts[:, 1]) <= r_rear) & (np.abs(local_pts[:, 2]) <= r_rear)
-        in_range = in_bev | in_side | in_rear
-        local_vis = local_pts[in_range]
-        mask_vis = mask[in_range]
-        inside = local_vis[mask_vis]
-        outside = local_vis[~mask_vis]
+        r_bev = max(max(l, w) * VIEW_BOX_RATIO, VIEW_MIN_RADIUS)
+        _, _, r_side, r_rear = nearby_points_for_views(local_pts, l, w, h)
+        self._r_bev, self._r_side, self._r_rear = r_bev, r_side, r_rear
+        if reset_limits and hasattr(self, "_ax_bev"):
+            self._ax_bev.set_xlim(-r_bev, r_bev)
+            self._ax_bev.set_ylim(-r_bev, r_bev)
+        if reset_limits and hasattr(self, "_ax_side"):
+            self._ax_side.set_xlim(-r_side, r_side)
+            self._ax_side.set_ylim(-r_side, r_side)
+        if reset_limits and hasattr(self, "_ax_rear"):
+            self._ax_rear.set_xlim(-r_rear, r_rear)
+            self._ax_rear.set_ylim(-r_rear, r_rear)
+
+        bev_xlim = self._ax_bev.get_xlim() if hasattr(self, "_ax_bev") else (-r_bev, r_bev)
+        bev_ylim = self._ax_bev.get_ylim() if hasattr(self, "_ax_bev") else (-r_bev, r_bev)
+        side_xlim = self._ax_side.get_xlim() if hasattr(self, "_ax_side") else (-r_side, r_side)
+        side_ylim = self._ax_side.get_ylim() if hasattr(self, "_ax_side") else (-r_side, r_side)
+        rear_xlim = self._ax_rear.get_xlim() if hasattr(self, "_ax_rear") else (-r_rear, r_rear)
+        rear_ylim = self._ax_rear.get_ylim() if hasattr(self, "_ax_rear") else (-r_rear, r_rear)
+
+        bev_disp_x = -local_pts[:, 1]
+        bev_disp_y = local_pts[:, 0]
+        side_disp_x = local_pts[:, 0]
+        side_disp_y = local_pts[:, 2]
+        rear_disp_x = -local_pts[:, 1]
+        rear_disp_y = local_pts[:, 2]
+        x_limit, y_limit, _ = nearby_view_limits(l, w, h)
+        half_l, half_w = l / 2, w / 2
+        side_view_w = abs(side_xlim[1] - side_xlim[0])
+        side_view_h = abs(side_ylim[1] - side_ylim[0])
+        rear_view_w = abs(rear_xlim[1] - rear_xlim[0])
+        rear_view_h = abs(rear_ylim[1] - rear_ylim[0])
+        side_scale = max(
+            side_view_w / max(2 * r_side, 1e-9),
+            side_view_h / max(2 * r_side, 1e-9),
+        )
+        rear_scale = max(
+            rear_view_w / max(2 * r_rear, 1e-9),
+            rear_view_h / max(2 * r_rear, 1e-9),
+        )
+        side_y_limit = half_w + max(0.0, y_limit - half_w) * side_scale
+        rear_x_limit = half_l + max(0.0, x_limit - half_l) * rear_scale
+
+        in_bev = (
+            (bev_disp_x >= min(bev_xlim)) & (bev_disp_x <= max(bev_xlim)) &
+            (bev_disp_y >= min(bev_ylim)) & (bev_disp_y <= max(bev_ylim))
+        )
+        in_side = (
+            (side_disp_x >= min(side_xlim)) & (side_disp_x <= max(side_xlim)) &
+            (side_disp_y >= min(side_ylim)) & (side_disp_y <= max(side_ylim)) &
+            (np.abs(local_pts[:, 1]) <= side_y_limit)
+        )
+        in_rear = (
+            (rear_disp_x >= min(rear_xlim)) & (rear_disp_x <= max(rear_xlim)) &
+            (rear_disp_y >= min(rear_ylim)) & (rear_disp_y <= max(rear_ylim)) &
+            (np.abs(local_pts[:, 0]) <= rear_x_limit)
+        )
+        local_bev = local_pts[in_bev]
+        mask_bev = mask[in_bev]
+        inside_bev = local_bev[mask_bev]
+        outside_bev = local_bev[~mask_bev]
+        local_side = local_pts[in_side]
+        mask_side = mask[in_side]
+        inside_side = local_side[mask_side]
+        outside_side = local_side[~mask_side]
+        local_rear = local_pts[in_rear]
+        mask_rear = mask[in_rear]
+        inside_rear = local_rear[mask_rear]
+        outside_rear = local_rear[~mask_rear]
         # BEV: 竖轴=local_x(朝向)，横轴=-local_y，与主视图框对齐
         if self._scatter_bev_out is not None:
-            off = np.column_stack([-outside[:, 1], outside[:, 0]]) if len(outside) > 0 else np.empty((0, 2))
+            off = np.column_stack([-outside_bev[:, 1], outside_bev[:, 0]]) if len(outside_bev) > 0 else np.empty((0, 2))
             self._scatter_bev_out.set_offsets(off)
         if self._scatter_bev_in is not None:
-            off = np.column_stack([-inside[:, 1], inside[:, 0]]) if len(inside) > 0 else np.empty((0, 2))
+            off = np.column_stack([-inside_bev[:, 1], inside_bev[:, 0]]) if len(inside_bev) > 0 else np.empty((0, 2))
             self._scatter_bev_in.set_offsets(off)
         if self._scatter_side_out is not None:
-            self._scatter_side_out.set_offsets(np.column_stack([outside[:, 0], outside[:, 2]]) if len(outside) > 0 else np.empty((0, 2)))
+            self._scatter_side_out.set_offsets(np.column_stack([outside_side[:, 0], outside_side[:, 2]]) if len(outside_side) > 0 else np.empty((0, 2)))
         if self._scatter_side_in is not None:
-            self._scatter_side_in.set_offsets(np.column_stack([inside[:, 0], inside[:, 2]]) if len(inside) > 0 else np.empty((0, 2)))
+            self._scatter_side_in.set_offsets(np.column_stack([inside_side[:, 0], inside_side[:, 2]]) if len(inside_side) > 0 else np.empty((0, 2)))
         if self._scatter_rear_out is not None:
-            off = np.column_stack([-outside[:, 1], outside[:, 2]]) if len(outside) > 0 else np.empty((0, 2))
+            off = np.column_stack([-outside_rear[:, 1], outside_rear[:, 2]]) if len(outside_rear) > 0 else np.empty((0, 2))
             self._scatter_rear_out.set_offsets(off)
         if self._scatter_rear_in is not None:
-            off = np.column_stack([-inside[:, 1], inside[:, 2]]) if len(inside) > 0 else np.empty((0, 2))
+            off = np.column_stack([-inside_rear[:, 1], inside_rear[:, 2]]) if len(inside_rear) > 0 else np.empty((0, 2))
             self._scatter_rear_in.set_offsets(off)
+
+    def _scroll_zoom(self, event):
+        """鼠标滚轮缩放当前三视图坐标轴。"""
+        ax = event.inaxes
+        if ax is None or event.xdata is None or event.ydata is None:
+            return
+        base = 0.85 if event.button == "up" else 1.18
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        cx, cy = event.xdata, event.ydata
+        new_w = (x1 - x0) * base
+        new_h = (y1 - y0) * base
+        relx = (cx - x0) / (x1 - x0) if abs(x1 - x0) > 1e-9 else 0.5
+        rely = (cy - y0) / (y1 - y0) if abs(y1 - y0) > 1e-9 else 0.5
+        ax.set_xlim(cx - new_w * relx, cx + new_w * (1 - relx))
+        ax.set_ylim(cy - new_h * rely, cy + new_h * (1 - rely))
+        self._update_scatter_points(reset_limits=False)
+        if event.canvas:
+            event.canvas.draw_idle()
 
     def _bev_hit(self, xd, yd):
         """命中检测：俯视图已逆时针旋转 90°，按到各边/手柄的最近距离判定，避免角点误判"""
@@ -448,7 +563,11 @@ class BboxThreeViewsPanel(QWidget):
         self._drag_mode = self._bev_hit(event.xdata, event.ydata)
         if self._drag_mode:
             self._drag_axis = "bev"
-            self._drag_start = (event.xdata, event.ydata, _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")))
+            self._drag_start = (
+                event.xdata, event.ydata,
+                _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")),
+                _safe_float(self._bbox_info.get("l")), _safe_float(self._bbox_info.get("w")),
+            )
 
     def _bev_motion(self, event):
         if event.inaxes != self._ax_bev:
@@ -473,37 +592,40 @@ class BboxThreeViewsPanel(QWidget):
         w = _safe_float(self._bbox_info.get("w"))
         yaw = _safe_float(self._bbox_info.get("yaw"))
         cx, cy = _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y"))
+        sx, sy, scx, scy = (self._drag_start[:4] if self._drag_start is not None and len(self._drag_start) >= 4 else (event.xdata, event.ydata, cx, cy))
+        sl = self._drag_start[4] if self._drag_start is not None and len(self._drag_start) >= 6 else l
+        sw = self._drag_start[5] if self._drag_start is not None and len(self._drag_start) >= 6 else w
         # 俯视图已旋转 90°：显示中 x 对应车宽，y 对应车长；左/右拖改 w，下/上拖改 l
         if self._drag_mode == "resize_w":
             # 拖显示右边缘 (x=w/2)
-            x = event.xdata if event.xdata is not None else w/2
-            new_w = np.clip(x + w/2, MIN_SIZE, MAX_SIZE)
-            disp_cx = (x - w/2) / 2
+            dx = ((event.xdata if event.xdata is not None else sx) - sx) * RESIZE_DRAG_SENSITIVITY
+            new_w = np.clip(sw + dx, MIN_SIZE, MAX_SIZE)
+            disp_cx = (new_w - sw) / 2
             self._bbox_info["w"] = new_w
-            self._bbox_info["x"] = cx + np.sin(yaw) * disp_cx
-            self._bbox_info["y"] = cy - np.cos(yaw) * disp_cx
+            self._bbox_info["x"] = scx + np.sin(yaw) * disp_cx
+            self._bbox_info["y"] = scy - np.cos(yaw) * disp_cx
         elif self._drag_mode == "resize_w_left":
-            x = event.xdata if event.xdata is not None else -w/2
-            new_w = np.clip(w/2 - x, MIN_SIZE, MAX_SIZE)
-            disp_cx = (x + w/2) / 2
+            dx = ((event.xdata if event.xdata is not None else sx) - sx) * RESIZE_DRAG_SENSITIVITY
+            new_w = np.clip(sw - dx, MIN_SIZE, MAX_SIZE)
+            disp_cx = (sw - new_w) / 2
             self._bbox_info["w"] = new_w
-            self._bbox_info["x"] = cx + np.sin(yaw) * disp_cx
-            self._bbox_info["y"] = cy - np.cos(yaw) * disp_cx
+            self._bbox_info["x"] = scx + np.sin(yaw) * disp_cx
+            self._bbox_info["y"] = scy - np.cos(yaw) * disp_cx
         elif self._drag_mode == "resize_l":
             # 拖显示上边缘 (y=l/2)，即车长
-            y = event.ydata if event.ydata is not None else l/2
-            new_l = np.clip(y + l/2, MIN_SIZE, MAX_SIZE)
-            disp_cy = (y - l/2) / 2
+            dy = ((event.ydata if event.ydata is not None else sy) - sy) * RESIZE_DRAG_SENSITIVITY
+            new_l = np.clip(sl + dy, MIN_SIZE, MAX_SIZE)
+            disp_cy = (new_l - sl) / 2
             self._bbox_info["l"] = new_l
-            self._bbox_info["x"] = cx + np.cos(yaw) * disp_cy
-            self._bbox_info["y"] = cy + np.sin(yaw) * disp_cy
+            self._bbox_info["x"] = scx + np.cos(yaw) * disp_cy
+            self._bbox_info["y"] = scy + np.sin(yaw) * disp_cy
         elif self._drag_mode == "resize_l_bottom":
-            y = event.ydata if event.ydata is not None else -l/2
-            new_l = np.clip(l/2 - y, MIN_SIZE, MAX_SIZE)
-            disp_cy = (y + l/2) / 2
+            dy = ((event.ydata if event.ydata is not None else sy) - sy) * RESIZE_DRAG_SENSITIVITY
+            new_l = np.clip(sl - dy, MIN_SIZE, MAX_SIZE)
+            disp_cy = (sl - new_l) / 2
             self._bbox_info["l"] = new_l
-            self._bbox_info["x"] = cx + np.cos(yaw) * disp_cy
-            self._bbox_info["y"] = cy + np.sin(yaw) * disp_cy
+            self._bbox_info["x"] = scx + np.cos(yaw) * disp_cy
+            self._bbox_info["y"] = scy + np.sin(yaw) * disp_cy
         elif self._drag_mode == "rotate":
             if event.xdata is not None and event.ydata is not None:
                 self._bbox_info["yaw"] = np.arctan2(event.ydata, event.xdata)
@@ -514,7 +636,7 @@ class BboxThreeViewsPanel(QWidget):
             # 显示 (dx,dy) -> 局部 (dy, -dx) -> 世界
             self._bbox_info["x"] = scx + np.cos(yaw) * dy + np.sin(yaw) * dx
             self._bbox_info["y"] = scy + np.sin(yaw) * dy - np.cos(yaw) * dx
-        self._sync_rects()
+        self._sync_rects(reset_limits=False)
         self._emit_bbox_edited()
 
     def _bev_release(self, event):
@@ -547,7 +669,11 @@ class BboxThreeViewsPanel(QWidget):
         self._drag_mode = self._side_hit(event.xdata, event.ydata)
         if self._drag_mode:
             self._drag_axis = "side"
-            self._drag_start = (event.xdata, event.ydata, _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")), _safe_float(self._bbox_info.get("z")))
+            self._drag_start = (
+                event.xdata, event.ydata,
+                _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")), _safe_float(self._bbox_info.get("z")),
+                _safe_float(self._bbox_info.get("l")), _safe_float(self._bbox_info.get("h")),
+            )
 
     def _side_motion(self, event):
         if event.inaxes != self._ax_side:
@@ -571,32 +697,35 @@ class BboxThreeViewsPanel(QWidget):
         h = _safe_float(self._bbox_info.get("h"))
         yaw = _safe_float(self._bbox_info.get("yaw"))
         cx, cy, cz = _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")), _safe_float(self._bbox_info.get("z"))
+        sx, sy, scx, scy, scz = (self._drag_start[:5] if self._drag_start is not None and len(self._drag_start) >= 5 else (event.xdata, event.ydata, cx, cy, cz))
+        sl = self._drag_start[5] if self._drag_start is not None and len(self._drag_start) >= 7 else l
+        sh = self._drag_start[6] if self._drag_start is not None and len(self._drag_start) >= 7 else h
         if self._drag_mode == "resize_l":
-            x = event.xdata if event.xdata is not None else l/2
-            new_l = np.clip(x + l/2, MIN_SIZE, MAX_SIZE)
-            disp = (x - l/2) / 2
+            dx = ((event.xdata if event.xdata is not None else sx) - sx) * RESIZE_DRAG_SENSITIVITY
+            new_l = np.clip(sl + dx, MIN_SIZE, MAX_SIZE)
+            disp = (new_l - sl) / 2
             self._bbox_info["l"] = new_l
-            self._bbox_info["x"] = cx + np.cos(yaw) * disp
-            self._bbox_info["y"] = cy + np.sin(yaw) * disp
+            self._bbox_info["x"] = scx + np.cos(yaw) * disp
+            self._bbox_info["y"] = scy + np.sin(yaw) * disp
         elif self._drag_mode == "resize_l_left":
-            x = event.xdata if event.xdata is not None else -l/2
-            new_l = np.clip(l/2 - x, MIN_SIZE, MAX_SIZE)
-            disp = (x + l/2) / 2
+            dx = ((event.xdata if event.xdata is not None else sx) - sx) * RESIZE_DRAG_SENSITIVITY
+            new_l = np.clip(sl - dx, MIN_SIZE, MAX_SIZE)
+            disp = (sl - new_l) / 2
             self._bbox_info["l"] = new_l
-            self._bbox_info["x"] = cx + np.cos(yaw) * disp
-            self._bbox_info["y"] = cy + np.sin(yaw) * disp
+            self._bbox_info["x"] = scx + np.cos(yaw) * disp
+            self._bbox_info["y"] = scy + np.sin(yaw) * disp
         elif self._drag_mode == "resize_h":
-            y = event.ydata if event.ydata is not None else h/2
-            new_h = np.clip(y + h/2, MIN_SIZE, MAX_SIZE)
-            disp = (y - h/2) / 2
+            dy = ((event.ydata if event.ydata is not None else sy) - sy) * RESIZE_DRAG_SENSITIVITY
+            new_h = np.clip(sh + dy, MIN_SIZE, MAX_SIZE)
+            disp = (new_h - sh) / 2
             self._bbox_info["h"] = new_h
-            self._bbox_info["z"] = cz + disp
+            self._bbox_info["z"] = scz + disp
         elif self._drag_mode == "resize_h_bottom":
-            y = event.ydata if event.ydata is not None else -h/2
-            new_h = np.clip(h/2 - y, MIN_SIZE, MAX_SIZE)
-            disp = (y + h/2) / 2
+            dy = ((event.ydata if event.ydata is not None else sy) - sy) * RESIZE_DRAG_SENSITIVITY
+            new_h = np.clip(sh - dy, MIN_SIZE, MAX_SIZE)
+            disp = (sh - new_h) / 2
             self._bbox_info["h"] = new_h
-            self._bbox_info["z"] = cz + disp
+            self._bbox_info["z"] = scz + disp
         elif self._drag_mode == "move" and self._drag_start is not None and len(self._drag_start) >= 5:
             sx, sy, scx, scy, scz = self._drag_start[0], self._drag_start[1], self._drag_start[2], self._drag_start[3], self._drag_start[4]
             dx = (event.xdata or sx) - sx
@@ -604,7 +733,7 @@ class BboxThreeViewsPanel(QWidget):
             self._bbox_info["x"] = scx + np.cos(yaw) * dx
             self._bbox_info["y"] = scy + np.sin(yaw) * dx
             self._bbox_info["z"] = scz + dz
-        self._sync_rects()
+        self._sync_rects(reset_limits=False)
         self._emit_bbox_edited()
 
     def _side_release(self, event):
@@ -637,7 +766,11 @@ class BboxThreeViewsPanel(QWidget):
         self._drag_mode = self._rear_hit(event.xdata, event.ydata)
         if self._drag_mode:
             self._drag_axis = "rear"
-            self._drag_start = (event.xdata, event.ydata, _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")), _safe_float(self._bbox_info.get("z")))
+            self._drag_start = (
+                event.xdata, event.ydata,
+                _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")), _safe_float(self._bbox_info.get("z")),
+                _safe_float(self._bbox_info.get("w")), _safe_float(self._bbox_info.get("h")),
+            )
 
     def _rear_motion(self, event):
         if event.inaxes != self._ax_rear:
@@ -661,32 +794,35 @@ class BboxThreeViewsPanel(QWidget):
         h = _safe_float(self._bbox_info.get("h"))
         yaw = _safe_float(self._bbox_info.get("yaw"))
         cx, cy, cz = _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")), _safe_float(self._bbox_info.get("z"))
+        sx, sy, scx, scy, scz = (self._drag_start[:5] if self._drag_start is not None and len(self._drag_start) >= 5 else (event.xdata, event.ydata, cx, cy, cz))
+        sw = self._drag_start[5] if self._drag_start is not None and len(self._drag_start) >= 7 else w
+        sh = self._drag_start[6] if self._drag_start is not None and len(self._drag_start) >= 7 else h
         if self._drag_mode == "resize_w":
-            x = event.xdata if event.xdata is not None else w/2
-            new_w = np.clip(x + w/2, MIN_SIZE, MAX_SIZE)
-            disp = (x - w/2) / 2
+            dx = ((event.xdata if event.xdata is not None else sx) - sx) * RESIZE_DRAG_SENSITIVITY
+            new_w = np.clip(sw + dx, MIN_SIZE, MAX_SIZE)
+            disp = (new_w - sw) / 2
             self._bbox_info["w"] = new_w
-            self._bbox_info["x"] = cx + np.sin(yaw) * disp
-            self._bbox_info["y"] = cy - np.cos(yaw) * disp
+            self._bbox_info["x"] = scx + np.sin(yaw) * disp
+            self._bbox_info["y"] = scy - np.cos(yaw) * disp
         elif self._drag_mode == "resize_w_left":
-            x = event.xdata if event.xdata is not None else -w/2
-            new_w = np.clip(w/2 - x, MIN_SIZE, MAX_SIZE)
-            disp = (x + w/2) / 2
+            dx = ((event.xdata if event.xdata is not None else sx) - sx) * RESIZE_DRAG_SENSITIVITY
+            new_w = np.clip(sw - dx, MIN_SIZE, MAX_SIZE)
+            disp = (sw - new_w) / 2
             self._bbox_info["w"] = new_w
-            self._bbox_info["x"] = cx + np.sin(yaw) * disp
-            self._bbox_info["y"] = cy - np.cos(yaw) * disp
+            self._bbox_info["x"] = scx + np.sin(yaw) * disp
+            self._bbox_info["y"] = scy - np.cos(yaw) * disp
         elif self._drag_mode == "resize_h":
-            y = event.ydata if event.ydata is not None else h/2
-            new_h = np.clip(y + h/2, MIN_SIZE, MAX_SIZE)
-            disp = (y - h/2) / 2
+            dy = ((event.ydata if event.ydata is not None else sy) - sy) * RESIZE_DRAG_SENSITIVITY
+            new_h = np.clip(sh + dy, MIN_SIZE, MAX_SIZE)
+            disp = (new_h - sh) / 2
             self._bbox_info["h"] = new_h
-            self._bbox_info["z"] = cz + disp
+            self._bbox_info["z"] = scz + disp
         elif self._drag_mode == "resize_h_bottom":
-            y = event.ydata if event.ydata is not None else -h/2
-            new_h = np.clip(h/2 - y, MIN_SIZE, MAX_SIZE)
-            disp = (y + h/2) / 2
+            dy = ((event.ydata if event.ydata is not None else sy) - sy) * RESIZE_DRAG_SENSITIVITY
+            new_h = np.clip(sh - dy, MIN_SIZE, MAX_SIZE)
+            disp = (sh - new_h) / 2
             self._bbox_info["h"] = new_h
-            self._bbox_info["z"] = cz + disp
+            self._bbox_info["z"] = scz + disp
         elif self._drag_mode == "move" and self._drag_start is not None and len(self._drag_start) >= 5:
             sx, sy, scx, scy, scz = self._drag_start[0], self._drag_start[1], self._drag_start[2], self._drag_start[3], self._drag_start[4]
             dy = (event.xdata or sx) - sx
@@ -694,7 +830,7 @@ class BboxThreeViewsPanel(QWidget):
             self._bbox_info["x"] = scx + np.sin(yaw) * dy
             self._bbox_info["y"] = scy - np.cos(yaw) * dy
             self._bbox_info["z"] = scz + dz
-        self._sync_rects()
+        self._sync_rects(reset_limits=False)
         self._emit_bbox_edited()
 
     def _rear_release(self, event):

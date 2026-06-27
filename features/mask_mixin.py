@@ -174,10 +174,10 @@ class MaskMixin:
 
             # 分开联动：只有在需要过滤点云时才刷新主界面点云
             if _key in ("keep_inside_points", "json_path") and keep_inside:
-                self.vis_fram(updata_color_bar=False)
+                self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
             elif _key == "keep_inside_points" and not keep_inside:
                 # 取消仅保留圈内点：恢复点云
-                self.vis_fram(updata_color_bar=False)
+                self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
 
             # 若 keep_inside_points 未开启，则 style/point_size/颜色改动只重建 mask，不刷新点云
             # 以实现“对主界面联动拆分”的效果。
@@ -191,5 +191,4 @@ class MaskMixin:
             ok, msg = self._rebuild_mask()
             self.frame_info_label.setText(msg)
         # 保证“仅保留圈内点”在确认后立即生效
-        self.vis_fram(updata_color_bar=False)
-
+        self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)

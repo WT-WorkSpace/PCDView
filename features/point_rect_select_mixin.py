@@ -52,14 +52,14 @@ class PointRectSelectMixin:
         """取消/开始新一轮框选前：去掉红色高亮并清空表格数据区。"""
         if self._points_rect_select_mask is not None:
             self._points_rect_select_mask = None
-            self.vis_fram(updata_color_bar=False)
+            self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
         self._reset_point_select_table_ui()
 
     def _restore_points_color_only(self):
         """仅恢复点云颜色（去掉红色高亮），不清空/隐藏左侧表格。"""
         if self._points_rect_select_mask is not None:
             self._points_rect_select_mask = None
-            self.vis_fram(updata_color_bar=False)
+            self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
 
     def _update_points_rect_button_style(self, active: bool):
         """让“点云框选”按钮在生效期间呈现不同颜色。"""
@@ -303,12 +303,12 @@ class PointRectSelectMixin:
             self._points_rect_select_mask = None
             self._fill_point_select_table(mask)
             self.frame_info_label.setText("框选区域内无点")
-            self.vis_fram(updata_color_bar=False)
+            self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
             return
         self._points_rect_select_mask = mask
         self._fill_point_select_table(mask)
         self.frame_info_label.setText("已框选 {} 个点".format(int(np.count_nonzero(mask))))
-        self.vis_fram(updata_color_bar=False)
+        self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
 
     def _clear_point_rect_selection(self):
         """取消框选：恢复点云颜色并清空表格。"""
@@ -327,4 +327,3 @@ class PointRectSelectMixin:
             )
             self._point_select_dock.hide()
         self._update_frame_info_label()
-

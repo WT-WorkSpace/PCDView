@@ -1,4 +1,5 @@
 import importlib
+from collections import deque
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -8,6 +9,9 @@ from utils.bbox_pick import fit_obb_xy
 
 class ObstacleCluster:
     """点云聚类与包围框提取流程（ROI -> 下采样 -> DBSCAN -> 框）。"""
+
+    def __init__(self):
+        self.last_stats = {}
 
     def points_in_roi(self, points_xyz: np.ndarray, roi_config: Dict) -> Tuple[np.ndarray, np.ndarray]:
         if points_xyz is None or len(points_xyz) == 0:
@@ -62,12 +66,74 @@ class ObstacleCluster:
         return down_points_np, voxel_indices_map
 
     def pcd_obstacle_cluster(self, points_xyz: np.ndarray, eps: float, min_points: int) -> np.ndarray:
-        sklearn_cluster = importlib.import_module("sklearn.cluster")
-        DBSCAN = getattr(sklearn_cluster, "DBSCAN")
         if points_xyz is None or len(points_xyz) == 0:
             return np.array([], dtype=np.int32)
-        labels = DBSCAN(eps=float(eps), min_samples=int(min_points)).fit_predict(points_xyz)
+        try:
+            sklearn_cluster = importlib.import_module("sklearn.cluster")
+            DBSCAN = getattr(sklearn_cluster, "DBSCAN")
+            labels = DBSCAN(eps=float(eps), min_samples=int(min_points)).fit_predict(points_xyz)
+        except ModuleNotFoundError:
+            labels = self._dbscan_numpy(points_xyz, float(eps), int(min_points))
         return np.asarray(labels, dtype=np.int32)
+
+    def _dbscan_numpy(self, points_xyz: np.ndarray, eps: float, min_points: int) -> np.ndarray:
+        """无 sklearn 时的轻量 DBSCAN fallback，使用网格邻域查询避免全量距离扫描。"""
+        pts = np.asarray(points_xyz, dtype=np.float64)
+        n = len(pts)
+        if n == 0:
+            return np.array([], dtype=np.int32)
+        labels = np.full(n, -1, dtype=np.int32)
+        visited = np.zeros(n, dtype=bool)
+        eps2 = float(eps) * float(eps)
+        cell_size = max(float(eps), 1e-6)
+        cell_keys = np.floor(pts / cell_size).astype(np.int64)
+        grid = {}
+        for idx, key in enumerate(cell_keys):
+            grid.setdefault((int(key[0]), int(key[1]), int(key[2])), []).append(idx)
+        cluster_id = 0
+
+        def region_query(idx):
+            key = cell_keys[idx]
+            candidate_indices = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        candidate_indices.extend(
+                            grid.get((int(key[0] + dx), int(key[1] + dy), int(key[2] + dz)), [])
+                        )
+            if not candidate_indices:
+                return np.array([], dtype=np.int64)
+            candidates = np.asarray(candidate_indices, dtype=np.int64)
+            diff = pts[candidates] - pts[idx]
+            dist2 = np.einsum("ij,ij->i", diff, diff)
+            return candidates[dist2 <= eps2]
+
+        for i in range(n):
+            if visited[i]:
+                continue
+            visited[i] = True
+            neighbors = region_query(i)
+            if len(neighbors) < min_points:
+                labels[i] = -1
+                continue
+
+            seeds = deque(int(v) for v in neighbors)
+            seed_set = set(int(v) for v in neighbors)
+            while seeds:
+                j = seeds.popleft()
+                if not visited[j]:
+                    visited[j] = True
+                    j_neighbors = region_query(j)
+                    if len(j_neighbors) >= min_points:
+                        for v in j_neighbors:
+                            iv = int(v)
+                            if iv not in seed_set:
+                                seeds.append(iv)
+                                seed_set.add(iv)
+                if labels[j] == -1:
+                    labels[j] = cluster_id
+            cluster_id += 1
+        return labels
 
     def obtained_cluster_box(self, points_xyz: np.ndarray) -> Dict:
         if points_xyz is None or len(points_xyz) < 3:
@@ -182,11 +248,25 @@ class ObstacleCluster:
 
     def cluster(self, points_xyz: np.ndarray, config: Dict) -> Tuple[List[Dict], np.ndarray]:
         roi_points, roi_mask = self.points_in_roi(points_xyz, config)
+        self.last_stats = {
+            "roi_points": int(len(roi_points)),
+            "downsampled_points": 0,
+            "cluster_points": 0,
+            "limited": False,
+        }
         if len(roi_points) == 0:
             return [], roi_mask
 
         voxel_size = float(config.get("voxel_size", 0.0))
         ds_points, voxel_map = self.pcd_down_sample(roi_points, voxel_size, config)
+        self.last_stats["downsampled_points"] = int(len(ds_points))
+        max_points = int(config.get("max_points", 20000))
+        if max_points > 0 and len(ds_points) > max_points:
+            keep_idx = np.linspace(0, len(ds_points) - 1, max_points, dtype=np.int64)
+            ds_points = ds_points[keep_idx]
+            voxel_map = {new_idx: voxel_map[int(old_idx)] for new_idx, old_idx in enumerate(keep_idx)}
+            self.last_stats["limited"] = True
+        self.last_stats["cluster_points"] = int(len(ds_points))
         labels = self.pcd_obstacle_cluster(ds_points, config["eps"], config["min_points"])
         if len(labels) == 0:
             return [], roi_mask

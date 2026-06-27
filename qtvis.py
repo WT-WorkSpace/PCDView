@@ -173,7 +173,7 @@ class PointCloudViewer(
         self._cluster_params = {
             "eps": 0.5,
             "min_points": 5,
-            "max_points": 200000,
+            "max_points": 20000,
             "voxel_size": 0.1,
             "use_lshape": False,
             "use_roi": True,
@@ -587,7 +587,7 @@ class PointCloudViewer(
 
     def _prune_bbox_attr_infos(self):
         keep = {
-            "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
+            "x", "y", "z", "l", "w", "h", "yaw", "arrow_yaw", "roll", "pitch",
             "class_name", "id", "link_id", "confidence", "movement_state",
         }
         keep.update(attr_def.get("key") or attr_def.get("name") for attr_def in self.bbox_attr_defs)
@@ -695,7 +695,7 @@ class PointCloudViewer(
                 if cidx is not None and event.button() in (Qt.LeftButton, Qt.RightButton):
                     self._selected_cluster_bbox_index = int(cidx)
                     self._update_cluster_select_mask_from_selected()
-                    self.vis_fram()
+                    self.vis_fram(preserve_current_bboxes=True)
                     return True
             except Exception as e:
                 print("cluster bbox pick error:", e)
@@ -848,22 +848,25 @@ class PointCloudViewer(
         if idx < 0 or idx >= len(self.current_bbox_infos):
             return
         info = self.current_bbox_infos[idx]
-        yaw = float(info.get("yaw", 0.0)) + np.pi / 2.0
-        info["yaw"] = float((yaw + np.pi) % (2.0 * np.pi) - np.pi)
+        arrow_yaw = self._bbox_arrow_yaw(info) + np.pi / 2.0
+        info["arrow_yaw"] = self._normalize_yaw(arrow_yaw)
         self._refresh_single_bbox_in_main_view(idx)
-        self._rebuild_link_arrows()
-        if self.bbox_three_views_panel.isVisible() and hasattr(self, "raw_points") and self.raw_points is not None:
-            self.bbox_three_views_panel.update_bbox(
-                self.raw_points[:, :3],
-                info,
-                bbox_index=idx,
-                on_bbox_edited=self._on_bbox_edited_from_panel,
-                class_names=list(self.class_map.keys()),
-            )
         self._show_bbox_attr_panel(idx, info)
         self.bbox_modified = True
         self._show_save_button_if_modified()
-        self.frame_info_label.setText("已将目标框 yaw 旋转 90 度")
+        self.frame_info_label.setText("已将目标框箭头方向旋转 90 度")
+
+    def _normalize_yaw(self, yaw):
+        return float((float(yaw) + np.pi) % (2.0 * np.pi) - np.pi)
+
+    def _bbox_arrow_yaw(self, info):
+        value = info.get("arrow_yaw", None)
+        if value is None:
+            value = info.get("yaw", 0.0)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(info.get("yaw", 0.0) or 0.0)
 
     def _refresh_bbox_selection_style(self):
         """根据 selected_bbox_index 刷新所有框的显示样式：选中为全包围半透明实体，未选中为线框"""
@@ -897,6 +900,7 @@ class PointCloudViewer(
         x, y, z = info["x"], info["y"], info["z"]
         l, w, h = info["l"], info["w"], info["h"]
         yaw = info["yaw"]
+        arrow_yaw = self._bbox_arrow_yaw(info)
         class_name = info.get("class_name", "")
         if class_name in self.class_map.keys():
             bbox_color = self.class_map[class_name]
@@ -905,7 +909,7 @@ class PointCloudViewer(
         color = QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
         is_selected = self.selected_bbox_index == bbox_index
         new_bbox = draw_bbox_solid(x, y, z, l, w, h, yaw, QColor(bbox_color[0], bbox_color[1], bbox_color[2], 80)) if is_selected else draw_bbox(x, y, z, l, w, h, yaw, color)
-        new_arrow = draw_arrow(np.array([x, y, z + h/2]), [np.cos(yaw), np.sin(yaw), 0], l/2, color)
+        new_arrow = draw_arrow(np.array([x, y, z + h/2]), [np.cos(arrow_yaw), np.sin(arrow_yaw), 0], l/2, color)
         str_id = str(info.get("id", "")) if info.get("id") is not None else "XX"
         new_text = GLTextItem(text=class_name + "-" + str_id, pos=(x, y, z+1), color=color, font=QFont('Helvetica', 10))
         base = bbox_index * 3
@@ -979,7 +983,7 @@ class PointCloudViewer(
         if pts_xyz is not None:
             mask = points_in_screen_rect(self.glwidget, pts_xyz, x_min, x_max, y_min, y_max)
             selected = pts_xyz[mask]
-            selected = filter_ground_points(selected)  # 过滤地面点
+            selected = filter_ground_points(selected)  # 平面拟合过滤地面点
         if selected is not None and len(selected) >= 3:
             xy_fit = fit_obb_xy(selected[:, :2])
             if xy_fit is not None:
@@ -1003,7 +1007,8 @@ class PointCloudViewer(
             bbox_color = self.class_map["others"]
         color = QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
         bbox = draw_bbox(x_c, y_c, z_c, l, w, h, yaw, color)
-        arrow = draw_arrow(np.array([x_c, y_c, z_c + h/2]), [np.cos(yaw), np.sin(yaw), 0], l/2, color)
+        arrow_yaw = self._bbox_arrow_yaw({"yaw": yaw})
+        arrow = draw_arrow(np.array([x_c, y_c, z_c + h/2]), [np.cos(arrow_yaw), np.sin(arrow_yaw), 0], l/2, color)
         vis_text = GLTextItem(text=class_name + "-new", pos=(x_c, y_c, z_c+1), color=color, font=QFont('Helvetica', 10))
         self.glwidget.addItem(bbox)
         self.glwidget.addItem(arrow)
@@ -1126,26 +1131,30 @@ class PointCloudViewer(
         self.current_bbox_items = []
         self.current_link_arrows = []
 
-    def _redraw_current_bboxes(self):
+    def _redraw_current_bboxes(self, reset_selection=True):
         self._clear_bbox_visual_items()
+        selected_index = None if reset_selection else self.selected_bbox_index
         for info in self.current_bbox_infos:
             x, y, z = info["x"], info["y"], info["z"]
             l, w, h = info["l"], info["w"], info["h"]
             yaw = info["yaw"]
+            arrow_yaw = self._bbox_arrow_yaw(info)
             class_name = info.get("class_name", "")
             bbox_color = self.class_map[class_name] if class_name in self.class_map.keys() else self.class_map["others"]
             color = QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
-            bbox = draw_bbox(x, y, z, l, w, h, yaw, color)
-            arrow = draw_arrow(np.array([x, y, z+h/2]), direction=[np.cos(yaw), np.sin(yaw), 0], length=l/2, color=color)
+            is_selected = selected_index == len(self.current_bbox_items) // 3
+            bbox = draw_bbox_solid(x, y, z, l, w, h, yaw, QColor(bbox_color[0], bbox_color[1], bbox_color[2], 80)) if is_selected else draw_bbox(x, y, z, l, w, h, yaw, color)
+            arrow = draw_arrow(np.array([x, y, z+h/2]), direction=[np.cos(arrow_yaw), np.sin(arrow_yaw), 0], length=l/2, color=color)
             str_id = str(info.get("id", "")) if info.get("id") is not None else "XX"
             vis_text = GLTextItem(text=class_name + "-" + str_id, pos=(x, y, z+1), color=color, font=QFont('Helvetica', 10))
             self.glwidget.addItem(bbox)
             self.glwidget.addItem(arrow)
             self.glwidget.addItem(vis_text)
             self.current_bbox_items.extend([bbox, arrow, vis_text])
-        self.selected_bbox_index = None
+        if reset_selection:
+            self.selected_bbox_index = None
         self._rebuild_link_arrows()
-        if hasattr(self, "bbox_attr_panel"):
+        if reset_selection and hasattr(self, "bbox_attr_panel"):
             self.bbox_attr_panel.clear_bbox()
             self.bbox_attr_panel.hide()
 
@@ -1294,8 +1303,20 @@ class PointCloudViewer(
             self.point_cloud_files = natsorted([
                 f for f in os.listdir(self.directory) if f.endswith('.txt') or f.endswith('.pcd')
             ])
+            if not self.point_cloud_files:
+                self.current_frame_index = -1
+                self.frame_slider.blockSignals(True)
+                self.frame_slider.setMaximum(0)
+                self.frame_slider.setValue(0)
+                self.frame_slider.blockSignals(False)
+                self.frame_info_label.setText("所选目录中没有 .txt 或 .pcd 点云文件")
+                QMessageBox.warning(self, "打开目录失败", "所选目录中没有 .txt 或 .pcd 点云文件")
+                return
             self.current_frame_index = 0
+            self.frame_slider.blockSignals(True)
             self.frame_slider.setMaximum(len(self.point_cloud_files) - 1)
+            self.frame_slider.setValue(self.current_frame_index)
+            self.frame_slider.blockSignals(False)
             self.bboxes_files = None
             self.load_frame()
             self._set_topdown_view()
@@ -1309,6 +1330,9 @@ class PointCloudViewer(
 
         if self.bboxes_directory:
             self.bboxes_files = natsorted([f for f in os.listdir(self.bboxes_directory) if f.endswith('.json')])
+            if not self.point_cloud_files or self.current_frame_index < 0:
+                self.frame_info_label.setText("已选择目标框目录，请先打开点云目录或点云文件")
+                return
             self.load_frame()
 
     def open_file(self):
@@ -1349,7 +1373,11 @@ class PointCloudViewer(
         import time
         start_time = time.time()
 
-        assert self.current_frame_index >= 0 and self.current_frame_index < len(self.point_cloud_files)
+        if (not self.point_cloud_files or self.directory is None or
+                self.current_frame_index < 0 or
+                self.current_frame_index >= len(self.point_cloud_files)):
+            self.frame_info_label.setText("当前没有可加载的点云帧")
+            return False
         self.pcd_file = os.path.join(self.directory, self.point_cloud_files[self.current_frame_index])
         self.raw_points, self.structured_points, metadata = get_points_from_pcd_file(self.pcd_file)
         self._points_rect_select_mask = None
@@ -1375,6 +1403,7 @@ class PointCloudViewer(
 
         if elapsed1_time < 100:
             time.sleep((100-elapsed1_time)/1000)
+        return True
 
 
 
@@ -1501,28 +1530,39 @@ class PointCloudViewer(
             )
             self.vis_fram()
 
-    def vis_fram(self, updata_color_bar=False):
+    def vis_fram(self, updata_color_bar=False, preserve_current_bboxes=False):
         # 兜底：程序启动时可能只是用文字点云初始化（此时 structured_points 可能不存在）
         if not hasattr(self, "structured_points"):
             self.structured_points = None
         if not hasattr(self, "metadata"):
             self.metadata = None
+        preserved_bbox_infos = [dict(info) for info in self.current_bbox_infos] if preserve_current_bboxes else None
+        preserved_selected_bbox_index = self.selected_bbox_index if preserve_current_bboxes else None
+        preserved_bbox_modified = self.bbox_modified if preserve_current_bboxes else False
         for item in self.current_bbox_items:
             self.glwidget.removeItem(item)
         for item in getattr(self, "current_link_arrows", []):
             self.glwidget.removeItem(item)
         self.current_bbox_items = []
-        self.current_bbox_infos = []
         self.current_link_arrows = []
-        self.selected_bbox_index = None
-        self.bbox_modified = False
-        self.save_bboxes_btn.hide()
+        if preserve_current_bboxes:
+            self.current_bbox_infos = preserved_bbox_infos
+            self.selected_bbox_index = preserved_selected_bbox_index
+            self.bbox_modified = preserved_bbox_modified
+        else:
+            self.current_bbox_infos = []
+            self.selected_bbox_index = None
+            self.bbox_modified = False
+            self.save_bboxes_btn.hide()
+            if hasattr(self, "bbox_attr_panel"):
+                self.bbox_attr_panel.clear_bbox()
+                self.bbox_attr_panel.hide()
         self._update_save_button_geometry()
-        if hasattr(self, "bbox_attr_panel"):
-            self.bbox_attr_panel.clear_bbox()
-            self.bbox_attr_panel.hide()
         self._clear_cluster_bboxes()
-        if self.bboxes_directory is not None:
+        if preserve_current_bboxes:
+            self._redraw_current_bboxes(reset_selection=False)
+            self._show_save_button_if_modified()
+        if not preserve_current_bboxes and self.bboxes_directory is not None:
             self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem)+".json")
             self.original_json_agents = None
             if os.path.isfile(self.json_path):
@@ -1549,9 +1589,16 @@ class PointCloudViewer(
                     color = QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
                     is_selected = self.selected_bbox_index == i
                     bbox = draw_bbox_solid(x, y, z, l, w, h, yaw, QColor(bbox_color[0], bbox_color[1], bbox_color[2], 80)) if is_selected else draw_bbox(x, y, z, l, w, h, yaw, color)
+                    arrow_yaw = yaw
+                    if "tag" in json_data and i < len(json_data["tag"]) and isinstance(json_data["tag"][i], dict):
+                        arrow_yaw = json_data["tag"][i].get("arrow_yaw", yaw)
+                    try:
+                        arrow_yaw = float(arrow_yaw)
+                    except (TypeError, ValueError):
+                        arrow_yaw = float(yaw)
 
                     vis_text = GLTextItem(text=class_name + "-" + str_id, pos=(x, y, z+1), color=color, font=QFont('Helvetica', 10))
-                    arrow = draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(yaw),np.sin(yaw),0],length= l/2 ,color = color)
+                    arrow = draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(arrow_yaw),np.sin(arrow_yaw),0],length= l/2 ,color = color)
 
                     self.glwidget.addItem(bbox)
                     self.glwidget.addItem(arrow)
@@ -1788,9 +1835,9 @@ class PointCloudViewer(
         min_points_spin.setValue(int(params.get("min_points", 5)))
 
         max_points_spin = QSpinBox(dlg)
-        max_points_spin.setRange(10, 2000000)
+        max_points_spin.setRange(10, 200000)
         max_points_spin.setSingleStep(1000)
-        max_points_spin.setValue(int(params.get("max_points", 200000)))
+        max_points_spin.setValue(int(params.get("max_points", 20000)))
         voxel_size_spin = QDoubleSpinBox(dlg)
         voxel_size_spin.setRange(0.0, 5.0)
         voxel_size_spin.setDecimals(2)
@@ -1956,14 +2003,14 @@ class PointCloudViewer(
         self._selected_cluster_bbox_index = None
         self._cluster_select_mask = None
         self._clear_cluster_bboxes()
-        self.vis_fram()
+        self.vis_fram(preserve_current_bboxes=True)
         self.frame_info_label.setText("已关闭点云聚类")
 
-    def _toggle_cluster_from_toolbar(self):
+    def _toggle_cluster_from_toolbar(self, checked=None):
         """工具栏聚类按钮：单击启用聚类，再次单击关闭聚类。"""
         if not hasattr(self, "_cluster_action"):
             return
-        checked = self._cluster_action.isChecked()
+        checked = self._cluster_action.isChecked() if checked is None else bool(checked)
         if checked:
             # 打开参数框并执行聚类；若取消则回滚按钮状态
             prev_enabled = self._cluster_enabled
@@ -1990,8 +2037,16 @@ class PointCloudViewer(
             return
         params = dict(getattr(self, "_cluster_params", {}))
         self._clear_cluster_bboxes()
+        self.frame_info_label.setText("聚类中...")
+        QApplication.processEvents()
+        cluster_points = self._points_for_cluster()
+        if cluster_points is None or len(cluster_points) == 0:
+            self.frame_info_label.setText("当前可聚类点云为空")
+            self._cluster_select_mask = None
+            self._selected_cluster_bbox_index = None
+            return
         try:
-            boxes, roi_mask = self._obstacle_cluster.cluster(self.raw_points[:, :3], params)
+            boxes, roi_mask = self._obstacle_cluster.cluster(cluster_points, params)
         except Exception as e:
             self.frame_info_label.setText(f"聚类失败: {e}")
             self._cluster_select_mask = None
@@ -2031,7 +2086,24 @@ class PointCloudViewer(
             self._selected_cluster_bbox_index = None
             self._cluster_select_mask = None
 
-        self.frame_info_label.setText(f"聚类完成：{len(self._cluster_bbox_items)} 个包围框")
+        stats = getattr(self._obstacle_cluster, "last_stats", {}) or {}
+        limited_text = "，已限流" if stats.get("limited") else ""
+        self.frame_info_label.setText(
+            "聚类完成：{} 个包围框；ROI {} 点，下采样 {} 点，参与 {} 点{}".format(
+                len(self._cluster_bbox_items),
+                stats.get("roi_points", "-"),
+                stats.get("downsampled_points", "-"),
+                stats.get("cluster_points", "-"),
+                limited_text,
+            )
+        )
+
+    def _points_for_cluster(self):
+        pts = np.asarray(self.raw_points[:, :3], dtype=np.float64)
+        keep_mask = self._mask_keep_inside_points(pts)
+        if len(keep_mask) == len(pts):
+            pts = pts[keep_mask]
+        return pts
 
     def _refresh_cluster_if_enabled(self):
         """若已启用聚类，则在当前帧按最新参数自动刷新聚类框。"""

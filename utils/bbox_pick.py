@@ -84,30 +84,108 @@ def world_to_screen(glwidget, world_pt):
     return out
 
 
-def filter_ground_points(points_xyz, height_threshold=0.7, percentile=20):
+def _plane_from_points(p0, p1, p2):
+    normal = np.cross(p1 - p0, p2 - p0)
+    norm = np.linalg.norm(normal)
+    if norm < 1e-9:
+        return None
+    normal = normal / norm
+    if normal[2] < 0:
+        normal = -normal
+    d = -float(np.dot(normal, p0))
+    return normal, d
+
+
+def _fit_plane_svd(points_xyz):
+    if points_xyz is None or len(points_xyz) < 3:
+        return None
+    pts = np.asarray(points_xyz, dtype=np.float64)
+    center = np.mean(pts, axis=0)
+    _, _, vh = np.linalg.svd(pts - center, full_matrices=False)
+    normal = vh[-1]
+    norm = np.linalg.norm(normal)
+    if norm < 1e-9:
+        return None
+    normal = normal / norm
+    if normal[2] < 0:
+        normal = -normal
+    d = -float(np.dot(normal, center))
+    return normal, d
+
+
+def filter_ground_points(
+    points_xyz,
+    distance_threshold=0.08,
+    lower_percentile=60,
+    min_normal_z=0.75,
+    max_iterations=120,
+    max_candidate_points=2000,
+):
     """
-    过滤地面点。保留 z > z_min + threshold 的点，或高于下 percentile 分位数的点。
-    points_xyz: (N,3) 数组。
-    返回过滤后的点数组。
+    通过平面拟合过滤地面点。
+
+    先从框选点中的低位点采样，RANSAC 拟合近似水平的地面平面，再保留位于平面上方的点。
+    若拟合失败或过滤后点太少，则返回原始点，避免误删导致无法生成 3D 框。
     """
     if points_xyz is None or len(points_xyz) < 4:
         return points_xyz
-    if len(points_xyz) < 30:
-        return points_xyz
     pts = np.asarray(points_xyz, dtype=np.float64)
+    if len(pts) < 30:
+        return pts
+
+    finite_mask = np.all(np.isfinite(pts), axis=1)
+    pts = pts[finite_mask]
+    if len(pts) < 30:
+        return points_xyz
+
     z = pts[:, 2]
-    z_min, z_max = np.min(z), np.max(z)
-    z_range = z_max - z_min
-    # 使用固定阈值与高度范围的比例，取较大者
-    thresh = max(height_threshold, 0.07 * z_range)
-    cutoff = z_min + thresh
-    # 或使用分位数：去掉最低 percentile 的点
-    pct_cutoff = np.percentile(z, percentile)
-    cutoff = max(cutoff, pct_cutoff)
-    mask = z > cutoff
-    filtered = pts[mask]
+    z_range = float(np.max(z) - np.min(z))
+    adaptive_threshold = max(float(distance_threshold), 0.02 * z_range)
+    z_cutoff = np.percentile(z, lower_percentile)
+    candidates = pts[z <= z_cutoff]
+    if len(candidates) < 3:
+        return points_xyz
+
+    rng = np.random.default_rng(0)
+    if len(candidates) > max_candidate_points:
+        sample_idx = rng.choice(len(candidates), size=max_candidate_points, replace=False)
+        candidates_for_ransac = candidates[sample_idx]
+    else:
+        candidates_for_ransac = candidates
+
+    best_inliers = None
+    best_plane = None
+    n_candidates = len(candidates_for_ransac)
+    for _ in range(max_iterations):
+        ids = rng.choice(n_candidates, size=3, replace=False)
+        plane = _plane_from_points(
+            candidates_for_ransac[ids[0]],
+            candidates_for_ransac[ids[1]],
+            candidates_for_ransac[ids[2]],
+        )
+        if plane is None:
+            continue
+        normal, d = plane
+        if abs(normal[2]) < min_normal_z:
+            continue
+        distances = np.abs(candidates @ normal + d)
+        inliers = distances <= adaptive_threshold
+        if best_inliers is None or int(np.sum(inliers)) > int(np.sum(best_inliers)):
+            best_inliers = inliers
+            best_plane = plane
+
+    if best_plane is None or best_inliers is None or np.sum(best_inliers) < 3:
+        return points_xyz
+
+    refined = _fit_plane_svd(candidates[best_inliers])
+    if refined is not None and abs(refined[0][2]) >= min_normal_z:
+        best_plane = refined
+
+    normal, d = best_plane
+    height_above_plane = pts @ normal + d
+    filtered = pts[height_above_plane > adaptive_threshold]
     if len(filtered) < 3:
-        return pts  # 过滤后太少则返回原有点
+        return points_xyz
     return filtered
 
 
