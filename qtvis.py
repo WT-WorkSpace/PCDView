@@ -2255,8 +2255,8 @@ GLOBAL_STYLESHEET = """
 """
 
 if __name__ == "__main__":
-    # 在创建 QApplication 之前设置软件 OpenGL 属性
-    QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)
+    if sys.platform == 'linux':
+        QApplication.setAttribute(Qt.AA_UseSoftwareOpenGL)
 
     app = QApplication(sys.argv)
     app.setWindowIcon(app_icon())
