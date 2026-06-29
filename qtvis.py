@@ -587,7 +587,7 @@ class PointCloudViewer(
 
     def _prune_bbox_attr_infos(self):
         keep = {
-            "x", "y", "z", "l", "w", "h", "yaw", "arrow_yaw", "roll", "pitch",
+            "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
             "class_name", "id", "link_id", "confidence", "movement_state",
         }
         keep.update(attr_def.get("key") or attr_def.get("name") for attr_def in self.bbox_attr_defs)
@@ -848,25 +848,34 @@ class PointCloudViewer(
         if idx < 0 or idx >= len(self.current_bbox_infos):
             return
         info = self.current_bbox_infos[idx]
-        arrow_yaw = self._bbox_arrow_yaw(info) + np.pi / 2.0
-        info["arrow_yaw"] = self._normalize_yaw(arrow_yaw)
+        info["yaw"] = self._normalize_yaw(float(info.get("yaw", 0.0) or 0.0) + np.pi / 2.0)
+        info["l"], info["w"] = info.get("w", 1.0), info.get("l", 1.0)
+        info.pop("arrow_yaw", None)
         self._refresh_single_bbox_in_main_view(idx)
         self._show_bbox_attr_panel(idx, info)
+        if (self.bbox_three_views_panel.isVisible() and
+                getattr(self.bbox_three_views_panel, "_bbox_index", None) == idx and
+                hasattr(self, "raw_points") and self.raw_points is not None):
+            self.bbox_three_views_panel.update_bbox(
+                self.raw_points[:, :3],
+                info,
+                bbox_index=idx,
+                on_bbox_edited=self._on_bbox_edited_from_panel,
+                class_names=list(self.class_map.keys()),
+            )
         self.bbox_modified = True
         self._show_save_button_if_modified()
-        self.frame_info_label.setText("已将目标框箭头方向旋转 90 度")
+        self.frame_info_label.setText("已将目标框 yaw 旋转 90 度")
 
     def _normalize_yaw(self, yaw):
         return float((float(yaw) + np.pi) % (2.0 * np.pi) - np.pi)
 
     def _bbox_arrow_yaw(self, info):
-        value = info.get("arrow_yaw", None)
-        if value is None:
-            value = info.get("yaw", 0.0)
+        value = info.get("yaw", 0.0)
         try:
             return float(value)
         except (TypeError, ValueError):
-            return float(info.get("yaw", 0.0) or 0.0)
+            return 0.0
 
     def _refresh_bbox_selection_style(self):
         """根据 selected_bbox_index 刷新所有框的显示样式：选中为全包围半透明实体，未选中为线框"""
@@ -1104,7 +1113,7 @@ class PointCloudViewer(
                 "class_name": class_name,
             }
             if "tag" in json_data and i < len(json_data["tag"]) and isinstance(json_data["tag"][i], dict):
-                reserved_tag_keys = {"link_id", "link_ID", "confidence", "movement_state"}
+                reserved_tag_keys = {"link_id", "link_ID", "confidence", "movement_state", "arrow_yaw"}
                 for key, value in json_data["tag"][i].items():
                     if key not in reserved_tag_keys:
                         info[key] = value
@@ -1191,8 +1200,10 @@ class PointCloudViewer(
         except Exception as e:
             QMessageBox.warning(self, "复制失败", str(e))
 
-    def _save_current_bboxes_if_modified(self):
-        if not getattr(self, "bbox_modified", False):
+    def _save_current_bboxes_if_modified(self, force_save=False):
+        if not getattr(self, "bbox_modified", False) and not force_save:
+            return True
+        if force_save and not self.current_bbox_infos and not getattr(self, "json_path", None) and not getattr(self, "bboxes_directory", None):
             return True
         ok = self._save_current_bboxes(show_message=True)
         if not ok:
@@ -1415,22 +1426,23 @@ class PointCloudViewer(
 
     def previous_frame(self):
         if self.current_frame_index > 0:
-            self._change_frame(self.current_frame_index - 1)
+            self._change_frame(self.current_frame_index - 1, force_save=True)
 
     def next_frame(self):
         if self.current_frame_index < len(self.point_cloud_files) - 1:
-            self._change_frame(self.current_frame_index + 1)
+            force_save = self.sender() is self.next_button
+            self._change_frame(self.current_frame_index + 1, force_save=force_save)
         else:
             self.timer.stop()
             self.playing = False
             self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
 
-    def _change_frame(self, target_index):
+    def _change_frame(self, target_index, force_save=False):
         if target_index == self.current_frame_index:
             return
         if target_index < 0 or target_index >= len(self.point_cloud_files):
             return
-        if not self._save_current_bboxes_if_modified():
+        if not self._save_current_bboxes_if_modified(force_save=force_save):
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(self.current_frame_index)
             self.frame_slider.blockSignals(False)
@@ -1589,16 +1601,8 @@ class PointCloudViewer(
                     color = QColor(bbox_color[0], bbox_color[1], bbox_color[2], bbox_color[3])
                     is_selected = self.selected_bbox_index == i
                     bbox = draw_bbox_solid(x, y, z, l, w, h, yaw, QColor(bbox_color[0], bbox_color[1], bbox_color[2], 80)) if is_selected else draw_bbox(x, y, z, l, w, h, yaw, color)
-                    arrow_yaw = yaw
-                    if "tag" in json_data and i < len(json_data["tag"]) and isinstance(json_data["tag"][i], dict):
-                        arrow_yaw = json_data["tag"][i].get("arrow_yaw", yaw)
-                    try:
-                        arrow_yaw = float(arrow_yaw)
-                    except (TypeError, ValueError):
-                        arrow_yaw = float(yaw)
-
                     vis_text = GLTextItem(text=class_name + "-" + str_id, pos=(x, y, z+1), color=color, font=QFont('Helvetica', 10))
-                    arrow = draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(arrow_yaw),np.sin(arrow_yaw),0],length= l/2 ,color = color)
+                    arrow = draw_arrow(np.array([x, y, z+h/2]), direction = [np.cos(yaw),np.sin(yaw),0],length= l/2 ,color = color)
 
                     self.glwidget.addItem(bbox)
                     self.glwidget.addItem(arrow)
@@ -1608,7 +1612,7 @@ class PointCloudViewer(
                     # 保存该框信息，供点击拾取时弹窗显示
                     info = {"x": x, "y": y, "z": z, "l": l, "w": w, "h": h, "yaw": yaw, "class_name": class_name}
                     if "tag" in json_data and i < len(json_data["tag"]) and isinstance(json_data["tag"][i], dict):
-                        reserved_tag_keys = {"link_id", "link_ID", "confidence", "movement_state"}
+                        reserved_tag_keys = {"link_id", "link_ID", "confidence", "movement_state", "arrow_yaw"}
                         for key, value in json_data["tag"][i].items():
                             if key not in reserved_tag_keys:
                                 info[key] = value

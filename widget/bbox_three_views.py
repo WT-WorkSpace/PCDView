@@ -64,6 +64,10 @@ def _safe_float(v, default=0.0):
         return default
 
 
+def _normalize_yaw(yaw):
+    return float((float(yaw) + np.pi) % (2.0 * np.pi) - np.pi)
+
+
 def points_in_bbox_local(raw_points_xyz, cx, cy, cz, l, w, h, yaw):
     """
     将世界坐标点变换到 bbox 局部坐标，并返回在 bbox 内的点。
@@ -384,9 +388,9 @@ class BboxThreeViewsPanel(QWidget):
             )
 
     def _yaw_button_step(self, direction):
-        """BEV 中 Yaw −/＋：三视图侧取反步进，使主窗口旋转方向与三视图操作一致。"""
+        """BEV 中 Yaw −/＋：直接修改七值框的 yaw。"""
         step_rad = np.deg2rad(YAW_BUTTON_STEP_DEG) * direction
-        self._bbox_info["yaw"] = _safe_float(self._bbox_info.get("yaw")) - step_rad
+        self._bbox_info["yaw"] = _normalize_yaw(_safe_float(self._bbox_info.get("yaw")) + step_rad)
         self._sync_rects()
         self._emit_bbox_edited()
 
@@ -567,6 +571,7 @@ class BboxThreeViewsPanel(QWidget):
                 event.xdata, event.ydata,
                 _safe_float(self._bbox_info.get("x")), _safe_float(self._bbox_info.get("y")),
                 _safe_float(self._bbox_info.get("l")), _safe_float(self._bbox_info.get("w")),
+                _safe_float(self._bbox_info.get("yaw")),
             )
 
     def _bev_motion(self, event):
@@ -595,6 +600,7 @@ class BboxThreeViewsPanel(QWidget):
         sx, sy, scx, scy = (self._drag_start[:4] if self._drag_start is not None and len(self._drag_start) >= 4 else (event.xdata, event.ydata, cx, cy))
         sl = self._drag_start[4] if self._drag_start is not None and len(self._drag_start) >= 6 else l
         sw = self._drag_start[5] if self._drag_start is not None and len(self._drag_start) >= 6 else w
+        syaw = self._drag_start[6] if self._drag_start is not None and len(self._drag_start) >= 7 else yaw
         # 俯视图已旋转 90°：显示中 x 对应车宽，y 对应车长；左/右拖改 w，下/上拖改 l
         if self._drag_mode == "resize_w":
             # 拖显示右边缘 (x=w/2)
@@ -628,7 +634,8 @@ class BboxThreeViewsPanel(QWidget):
             self._bbox_info["y"] = scy + np.sin(yaw) * disp_cy
         elif self._drag_mode == "rotate":
             if event.xdata is not None and event.ydata is not None:
-                self._bbox_info["yaw"] = np.arctan2(event.ydata, event.xdata)
+                delta_yaw = np.arctan2(-event.xdata, event.ydata)
+                self._bbox_info["yaw"] = _normalize_yaw(syaw + delta_yaw)
         elif self._drag_mode == "move" and self._drag_start is not None and len(self._drag_start) >= 4:
             sx, sy, scx, scy = self._drag_start[0], self._drag_start[1], self._drag_start[2], self._drag_start[3]
             dx = (event.xdata or sx) - sx

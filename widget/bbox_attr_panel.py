@@ -390,4 +390,8 @@ class BboxAttributePanel(QWidget):
                     value = text or None
                 self._bbox_info[key] = value
         if self._on_bbox_edited and self._bbox_index is not None:
-            self._on_bbox_edited(self._bbox_index, dict(self._bbox_info))
+            edited_attrs = {
+                key: self._bbox_info.get(key)
+                for key in self._custom_controls.keys()
+            }
+            self._on_bbox_edited(self._bbox_index, edited_attrs)

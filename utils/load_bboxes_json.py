@@ -155,6 +155,7 @@ def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
 
         tag = agent.get("tag") or agent.get("tags") or {}
         tag = dict(tag) if isinstance(tag, dict) else {}
+        tag.pop("arrow_yaw", None)
         link_id = info.get("link_id")
         confidence = info.get("confidence")
         movement_state = info.get("movement_state")
@@ -174,7 +175,7 @@ def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
 
         reserved_keys = {
             "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
-            "class_name", "id", "link_id", "confidence", "movement_state",
+            "class_name", "id", "link_id", "confidence", "movement_state", "arrow_yaw",
         }
         for key, value in info.items():
             if key in reserved_keys:
