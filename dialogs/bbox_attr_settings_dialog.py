@@ -7,10 +7,12 @@ from PyQt5.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QCheckBox,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -30,23 +32,42 @@ RESERVED_ATTR_NAMES = {
 
 
 class BboxAttrSettingsDialog(QDialog):
-    def __init__(self, attr_defs=None, parent=None):
+    def __init__(self, attr_defs=None, history_browse_enabled=False, parent=None):
         super().__init__(parent)
         self.setWindowFlag(Qt.Window, True)
-        self.setWindowTitle("属性设置")
-        self.resize(760, 380)
+        self.setWindowTitle("标注设置")
+        self.resize(760, 440)
 
         layout = QVBoxLayout(self)
+
+        history_group = QGroupBox("历史帧", self)
+        history_layout = QVBoxLayout(history_group)
+        self.history_overlay_radio = QRadioButton(
+            "历史帧叠加模式（按住 Shift 显示所有历史帧）",
+            history_group,
+        )
+        self.history_browse_radio = QRadioButton(
+            "历史帧播放模式（按住 Shift 后左键下一帧、右键上一帧）",
+            history_group,
+        )
+        self.history_overlay_radio.setChecked(not bool(history_browse_enabled))
+        self.history_browse_radio.setChecked(bool(history_browse_enabled))
+        history_layout.addWidget(self.history_overlay_radio)
+        history_layout.addWidget(self.history_browse_radio)
+        layout.addWidget(history_group)
+
+        attr_group = QGroupBox("目标框属性", self)
+        attr_layout = QVBoxLayout(attr_group)
         tip = QLabel("每行一个属性。下拉/勾选类型的选项用逗号分隔；默认值为空表示不预填。")
         tip.setWordWrap(True)
-        layout.addWidget(tip)
+        attr_layout.addWidget(tip)
 
         self.table = QTableWidget(0, 5, self)
         self.table.setHorizontalHeaderLabels(["属性名", "方式", "可不写入", "默认值", "选项"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked)
-        layout.addWidget(self.table)
+        attr_layout.addWidget(self.table)
 
         tools = QHBoxLayout()
         self.add_btn = QPushButton("添加属性")
@@ -56,7 +77,8 @@ class BboxAttrSettingsDialog(QDialog):
         tools.addWidget(self.add_btn)
         tools.addWidget(self.remove_btn)
         tools.addStretch()
-        layout.addLayout(tools)
+        attr_layout.addLayout(tools)
+        layout.addWidget(attr_group)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
         buttons.accepted.connect(self._accept_if_valid)
@@ -158,9 +180,12 @@ class BboxAttrSettingsDialog(QDialog):
         try:
             self._attr_defs = self._collect_defs()
         except ValueError as exc:
-            QMessageBox.warning(self, "属性设置", str(exc))
+            QMessageBox.warning(self, "标注设置", str(exc))
             return
         self.accept()
 
     def attr_defs(self):
         return list(getattr(self, "_attr_defs", []))
+
+    def history_browse_enabled(self):
+        return bool(self.history_browse_radio.isChecked())

@@ -95,7 +95,7 @@ class BboxAttributePanel(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         self.title_label = QLabel("未选择目标框")
         self.title_label.setObjectName("BboxAttributeTitle")
-        self.settings_btn = QPushButton("属性设置")
+        self.settings_btn = QPushButton("标注设置")
         self.settings_btn.setObjectName("BboxAttrSettingsButton")
         self.settings_btn.clicked.connect(self.attrSettingsRequested.emit)
         header_layout.addWidget(self.title_label, 1)

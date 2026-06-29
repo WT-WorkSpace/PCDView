@@ -21,6 +21,7 @@ python -m PyInstaller --onefile --windowed \
   --add-data "icons/next.png:icons" \
   --add-data "icons/next.png:icons" \
   --add-data "icons/open.svg:icons" \
+  --add-data "icons/history.svg:icons" \
   --add-data "icons/open_dir.svg:icons" \
   --add-data "icons/box_selection.svg:icons" \
   --add-data "icons/cancel_box_selection.svg:icons" \
@@ -37,7 +38,7 @@ python -m PyInstaller --onefile --windowed \
   --add-data "icons/open_boxes_dir.svg:icons" \
   --add-data "icons/wangge.svg:icons" \
   --add-data "icons/add_bbox.svg:icons" \
-  --add-data "icons/extrinsic_calib.svg:icons" \
+  --add-data "icons/calibration.svg:icons" \
   qtvis.py
 
 # 打包完成后在桌面创建快捷方式

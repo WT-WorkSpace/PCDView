@@ -67,6 +67,9 @@ class PointCloudViewer(
         self.create_toolbar()
         self.create_controls()
         self.init_state()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
     def init_ui(self):
         # PyInstaller onefile 下资源在 sys._MEIPASS/icons
@@ -128,6 +131,15 @@ class PointCloudViewer(
         self.original_json_agents = None  # 原始 JSON agent 列表，保存时用于保留额外字段
         self.bboxes_directory = None
         self.json_path = None
+        self.history_frames_directory = None
+        self.history_frame_index = {}
+        self.history_points_cache = {}
+        self.history_single_points_cache = {}
+        self.history_scatter = None
+        self.history_shift_down = False
+        self.history_display_mode = "overlay"
+        self.history_browse_index = 0
+        self.history_main_scatter_hidden = False
 
         self.points_rect_select_mode = False  # 点云框选：拖拽矩形，选中点标红并列表展示
         self._points_rect_select_mask = None  # 与当前点云等长的 bool 掩码，或 None
@@ -258,6 +270,14 @@ class PointCloudViewer(
         self.rotate_yaw_shortcut.activated.connect(self._rotate_selected_bbox_yaw_90)
         self.next_bbox_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
         self.next_bbox_shortcut.activated.connect(self._show_next_bbox_three_view)
+        self.prev_frame_shortcut = QShortcut(QKeySequence(Qt.Key_Z), self)
+        self.prev_frame_shortcut.activated.connect(self.previous_frame)
+        self.next_frame_shortcut = QShortcut(QKeySequence(Qt.Key_X), self)
+        self.next_frame_shortcut.activated.connect(self.next_frame)
+        self.prev_history_frame_shortcut = QShortcut(QKeySequence(Qt.SHIFT | Qt.Key_Z), self)
+        self.prev_history_frame_shortcut.activated.connect(self.previous_frame)
+        self.next_history_frame_shortcut = QShortcut(QKeySequence(Qt.SHIFT | Qt.Key_X), self)
+        self.next_history_frame_shortcut.activated.connect(self.next_frame)
         # 主视图右上角 Save 按钮（修改框后显示）
         self.copy_prev_bboxes_btn = QPushButton("Copy Prev", self.glwidget)
         self.copy_prev_bboxes_btn.setStyleSheet(
@@ -279,7 +299,7 @@ class PointCloudViewer(
         self.save_bboxes_btn.hide()
 
         self.bbox_attr_panel = BboxAttributePanel(self.glwidget)
-        self.bbox_attr_panel.attrSettingsRequested.connect(self._open_bbox_attr_settings)
+        self.bbox_attr_panel.attrSettingsRequested.connect(self._open_annotation_settings)
         self.bbox_attr_panel.hide()
 
     def _update_save_button_geometry(self):
@@ -343,6 +363,7 @@ class PointCloudViewer(
         self.toolbar.addAction(self.open_file_action)
         self.toolbar.addAction(self.open_dir_action)
         self.toolbar.addAction(self.open_bboxes_dir_action)
+        self.toolbar.addAction(self.open_history_frames_action)
         self.toolbar.addSeparator()
 
         self.toolbar.addAction(self.increase_pointsize_action)
@@ -396,7 +417,7 @@ class PointCloudViewer(
         self.toolbar.addSeparator()
         self._extrinsic_calib_action = self.create_action(
             "外参标定",
-            "icons/extrinsic_calib.svg",
+            "icons/calibration.svg",
             self._toggle_extrinsic_calib,
         )
         self._extrinsic_calib_action.setCheckable(True)
@@ -415,9 +436,11 @@ class PointCloudViewer(
         self.open_file_action = self.create_action("Open File", 'icons/open.svg', self.open_file)
         self.open_dir_action = self.create_action("Open Directory", 'icons/open_dir.svg', self.open_directory)
         self.open_bboxes_dir_action = self.create_action("Open BBoxes Dir", 'icons/open_boxes_dir.svg',self.open_bboxes_directory)
+        self.open_history_frames_action = self.create_action("导入历史帧", 'icons/history.svg', self.open_history_frames_directory)
         file_menu.addAction(self.open_file_action)
         file_menu.addAction(self.open_dir_action)
         file_menu.addAction(self.open_bboxes_dir_action)
+        file_menu.addAction(self.open_history_frames_action)
 
     def create_tools_menus(self):
         tool_menu = self.menu_bar.addMenu("Tools")
@@ -437,11 +460,11 @@ class PointCloudViewer(
             "当前帧点云聚类", "icons/cluster.svg", self._open_cluster_dialog
         )
         self._extrinsic_calib_menu_action = self.create_action(
-            "多雷达外参标定", "icons/extrinsic_calib.svg", self._toggle_extrinsic_calib
+            "多雷达外参标定", "icons/calibration.svg", self._toggle_extrinsic_calib
         )
         self._extrinsic_calib_menu_action.setCheckable(True)
         self._bbox_attr_settings_action = self.create_action(
-            "目标框属性设置", "icons/add_bbox.svg", self._open_bbox_attr_settings
+            "标注设置", "icons/add_bbox.svg", self._open_annotation_settings
         )
         self.save_view_action = self.create_action("Save View", 'icons/save_view.svg', self.save_view)
         self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
@@ -514,15 +537,19 @@ class PointCloudViewer(
         with open(path, "w", encoding="UTF-8") as f:
             json.dump({"attributes": self.bbox_attr_defs}, f, indent=2, ensure_ascii=False)
 
-    def _open_bbox_attr_settings(self):
-        dialog = BboxAttrSettingsDialog(self.bbox_attr_defs, None)
+    def _open_annotation_settings(self):
+        dialog = BboxAttrSettingsDialog(
+            self.bbox_attr_defs,
+            self.history_display_mode == "browse",
+            self,
+        )
         if dialog.exec_() != QDialog.Accepted:
             return
         self.bbox_attr_defs = dialog.attr_defs()
         try:
             self._save_bbox_attr_defs()
         except Exception as exc:
-            QMessageBox.warning(self, "属性设置", "保存属性配置失败: {}".format(exc))
+            QMessageBox.warning(self, "标注设置", "保存属性配置失败: {}".format(exc))
         if hasattr(self, "bbox_attr_panel"):
             self._prune_bbox_attr_infos()
             if self.current_bbox_infos:
@@ -531,6 +558,7 @@ class PointCloudViewer(
             self.bbox_attr_panel.set_attr_defs(self.bbox_attr_defs)
             if self.selected_bbox_index is not None and self.selected_bbox_index < len(self.current_bbox_infos):
                 self._show_bbox_attr_panel(self.selected_bbox_index, self.current_bbox_infos[self.selected_bbox_index])
+        self._set_history_display_mode(dialog.history_browse_enabled())
 
     def _parse_bbox_attr_default(self, attr_def):
         if "default" not in attr_def:
@@ -642,6 +670,12 @@ class PointCloudViewer(
 
     def eventFilter(self, obj, event):
         """鼠标在 3D 视图上：框选模式拖拽生成框；否则左键点击显示三视图，右键显示目标框信息"""
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Shift and not event.isAutoRepeat():
+            self.history_shift_down = True
+            self._refresh_history_frame_visibility()
+        elif event.type() == QEvent.KeyRelease and event.key() == Qt.Key_Shift and not event.isAutoRepeat():
+            self.history_shift_down = False
+            self._hide_history_frames()
         if obj != self.glwidget:
             return super().eventFilter(obj, event)
         if event.type() == QEvent.Resize:
@@ -662,6 +696,15 @@ class PointCloudViewer(
             ratio = 1.0
         mx = event.pos().x() * ratio
         my = event.pos().y() * ratio
+
+        if (self.history_shift_down and self.history_display_mode == "browse" and
+                event.type() == QEvent.MouseButtonPress):
+            if event.button() == Qt.LeftButton:
+                self._step_history_browse_frame(1)
+                return True
+            if event.button() == Qt.RightButton:
+                self._step_history_browse_frame(-1)
+                return True
 
         if self.box_select_mode:
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -1407,6 +1450,214 @@ class PointCloudViewer(
                 return
             self.load_frame()
 
+    def open_history_frames_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "选择历史帧目录", self._default_history_frames_directory())
+        if not directory:
+            return
+        self.history_frames_directory = directory
+        self.history_frame_index = self._build_history_frame_index(directory)
+        self.history_points_cache = {}
+        self.history_single_points_cache = {}
+        self.history_browse_index = 0
+        self._hide_history_frames()
+        count = sum(len(files) for files in self.history_frame_index.values())
+        self.frame_info_label.setText("已导入历史帧目录：{}，匹配组 {} 个，文件 {} 个。按住 Shift 显示历史帧。".format(
+            os.path.basename(directory), len(self.history_frame_index), count
+        ))
+        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+            self.history_shift_down = True
+            self._refresh_history_frame_visibility()
+
+    def _toggle_history_browse_mode(self, checked=False):
+        self._set_history_display_mode(bool(checked))
+
+    def _set_history_display_mode(self, browse_enabled):
+        self.history_display_mode = "browse" if browse_enabled else "overlay"
+        self.history_browse_index = 0
+        self._hide_history_frames()
+        mode_text = "播放模式：按住 Shift 后左键下一帧、右键上一帧" if browse_enabled else "叠加模式：按住 Shift 显示所有历史帧"
+        self.frame_info_label.setText("历史帧{}".format(mode_text))
+        if self.history_shift_down:
+            self._refresh_history_frame_visibility()
+
+    def _default_history_frames_directory(self):
+        candidates = []
+        if getattr(self, "directory", None):
+            candidates.append(os.path.join(os.path.dirname(self.directory), "multiframe_data"))
+            candidates.append(self.directory)
+        if getattr(self, "pcd_file", None):
+            parent = os.path.dirname(self.pcd_file)
+            candidates.append(os.path.join(os.path.dirname(parent), "multiframe_data"))
+            candidates.append(parent)
+        for path in candidates:
+            if path and os.path.isdir(path):
+                return path
+        return ""
+
+    def _build_history_frame_index(self, directory):
+        index = {}
+        if not directory or not os.path.isdir(directory):
+            return index
+        exts = (".pcd", ".txt")
+        for name in os.listdir(directory):
+            path = os.path.join(directory, name)
+            if os.path.isdir(path):
+                files = [
+                    os.path.join(path, f)
+                    for f in os.listdir(path)
+                    if f.lower().endswith(exts)
+                ]
+                if files:
+                    index[name] = natsorted(files)
+            elif os.path.isfile(path) and name.lower().endswith(exts):
+                index.setdefault(Path(name).stem, []).append(path)
+        for key, files in list(index.items()):
+            index[key] = natsorted(files)
+        return index
+
+    def _current_history_key(self):
+        if getattr(self, "pcd_file", None):
+            return Path(self.pcd_file).stem
+        if self.point_cloud_files and 0 <= self.current_frame_index < len(self.point_cloud_files):
+            return Path(self.point_cloud_files[self.current_frame_index]).stem
+        return None
+
+    def _current_history_files(self):
+        key = self._current_history_key()
+        if not key or not self.history_frame_index:
+            return []
+        return list(self.history_frame_index.get(key, []))
+
+    def _load_current_history_points(self):
+        key = self._current_history_key()
+        if not key:
+            return None
+        if key in self.history_points_cache:
+            return self.history_points_cache[key]
+        files = self._current_history_files()
+        if not files:
+            self.history_points_cache[key] = None
+            return None
+        chunks = []
+        for path in files:
+            points = self._load_history_points_file(path)
+            if points is not None and len(points) > 0:
+                chunks.append(points)
+        merged = np.vstack(chunks) if chunks else None
+        self.history_points_cache[key] = merged
+        return merged
+
+    def _load_history_points_file(self, path):
+        if path in self.history_single_points_cache:
+            return self.history_single_points_cache[path]
+        try:
+            points, _, _ = get_points_from_pcd_file(path)
+        except Exception as exc:
+            print("load history frame failed:", path, exc)
+            self.history_single_points_cache[path] = None
+            return None
+        if points is None or len(points) == 0:
+            self.history_single_points_cache[path] = None
+            return None
+        xyz = np.asarray(points[:, :3], dtype=np.float32)
+        self.history_single_points_cache[path] = xyz
+        return xyz
+
+    def _hide_main_frame_scatter_for_history(self):
+        if self.history_main_scatter_hidden:
+            return
+        scatter = getattr(self, "scatter", None)
+        if scatter is None:
+            return
+        try:
+            items = getattr(self.glwidget, "items", None)
+            if items is None or scatter in items:
+                self.glwidget.removeItem(scatter)
+                self.history_main_scatter_hidden = True
+        except ValueError:
+            self.history_main_scatter_hidden = True
+
+    def _restore_main_frame_scatter_after_history(self):
+        if not self.history_main_scatter_hidden:
+            return
+        scatter = getattr(self, "scatter", None)
+        if scatter is not None:
+            items = getattr(self.glwidget, "items", None)
+            if items is None or scatter not in items:
+                self.glwidget.addItem(scatter)
+        self.history_main_scatter_hidden = False
+
+    def _hide_history_frames(self, restore_main=True):
+        if self.history_scatter is None:
+            if restore_main:
+                self._restore_main_frame_scatter_after_history()
+            return
+        try:
+            items = getattr(self.glwidget, "items", None)
+            if items is None or self.history_scatter in items:
+                self.glwidget.removeItem(self.history_scatter)
+        except ValueError:
+            pass
+        self.history_scatter = None
+        if restore_main:
+            self._restore_main_frame_scatter_after_history()
+
+    def _refresh_history_frame_visibility(self):
+        self._hide_history_frames(restore_main=False)
+        if not self.history_shift_down or not self.history_frame_index:
+            self._restore_main_frame_scatter_after_history()
+            return
+        files = self._current_history_files()
+        if not files:
+            key = self._current_history_key()
+            self._restore_main_frame_scatter_after_history()
+            self.frame_info_label.setText("当前帧无匹配历史帧：{}".format(key or "-"))
+            return
+        if self.history_display_mode == "browse":
+            self._show_history_browse_frame(files)
+            return
+        points = self._load_current_history_points()
+        if points is None or len(points) == 0:
+            self._restore_main_frame_scatter_after_history()
+            self.frame_info_label.setText("当前帧历史帧为空或加载失败")
+            return
+        rgba = np.tile(np.array([[1.0, 0.62, 0.05, 0.38]], dtype=np.float32), (len(points), 1))
+        size = max(float(self.point_size) * 0.75, 0.5)
+        self.history_scatter = GLScatterPlotItem(pos=points, color=rgba, size=size)
+        self.glwidget.addItem(self.history_scatter)
+        self.frame_info_label.setText("已叠加显示 {} 帧历史帧，共 {} 个点".format(len(files), len(points)))
+
+    def _show_history_browse_frame(self, files):
+        if not files:
+            return
+        self._hide_main_frame_scatter_for_history()
+        self.history_browse_index %= len(files)
+        path = files[self.history_browse_index]
+        points = self._load_history_points_file(path)
+        if points is None or len(points) == 0:
+            self.frame_info_label.setText("历史帧加载失败：{}".format(os.path.basename(path)))
+            return
+        rgba = np.tile(np.array([[1.0, 0.62, 0.05, 0.95]], dtype=np.float32), (len(points), 1))
+        self.history_scatter = GLScatterPlotItem(pos=points, color=rgba, size=self.point_size)
+        self.glwidget.addItem(self.history_scatter)
+        self.frame_info_label.setText("历史帧浏览 {}/{}：{}，左键下一帧，右键上一帧".format(
+            self.history_browse_index + 1, len(files), os.path.basename(path)
+        ))
+
+    def _step_history_browse_frame(self, delta):
+        files = self._current_history_files()
+        if not files:
+            return
+        self.history_browse_index = (self.history_browse_index + delta) % len(files)
+        self._refresh_history_frame_visibility()
+
+    def _is_history_browse_active(self):
+        return (
+            self.history_shift_down and
+            self.history_display_mode == "browse" and
+            bool(self._current_history_files())
+        )
+
     def open_file(self):
         self.timer.stop()
         self.playing = False
@@ -1486,10 +1737,16 @@ class PointCloudViewer(
         return normalized_matrix
 
     def previous_frame(self):
+        if self._is_history_browse_active():
+            self._step_history_browse_frame(-1)
+            return
         if self.current_frame_index > 0:
             self._change_frame(self.current_frame_index - 1, force_save=True)
 
     def next_frame(self):
+        if self._is_history_browse_active():
+            self._step_history_browse_frame(1)
+            return
         if self.current_frame_index < len(self.point_cloud_files) - 1:
             force_save = self.sender() is self.next_button
             self._change_frame(self.current_frame_index + 1, force_save=force_save)
@@ -1515,6 +1772,9 @@ class PointCloudViewer(
         self.load_frame()
 
     def toggle_play_pause(self):
+        if self._is_history_browse_active():
+            self._step_history_browse_frame(1)
+            return
         if self.playing:
             self.timer.stop()
             self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
@@ -1609,6 +1869,7 @@ class PointCloudViewer(
             self.structured_points = None
         if not hasattr(self, "metadata"):
             self.metadata = None
+        self._hide_history_frames()
         preserved_bbox_infos = [dict(info) for info in self.current_bbox_infos] if preserve_current_bboxes else None
         preserved_selected_bbox_index = self.selected_bbox_index if preserve_current_bboxes else None
         preserved_bbox_modified = self.bbox_modified if preserve_current_bboxes else False
@@ -1796,6 +2057,7 @@ class PointCloudViewer(
             if updata_color_bar:
                 self.update_color_sidebar()
             self._refresh_cluster_if_enabled()
+            self._refresh_history_frame_visibility()
             return
 
         if self.color_fields is not None:
@@ -1864,6 +2126,7 @@ class PointCloudViewer(
         if updata_color_bar:
             self.update_color_sidebar()
         self._refresh_cluster_if_enabled()
+        self._refresh_history_frame_visibility()
 
     def _open_cluster_dialog(self):
         """打开当前帧点云聚类参数窗口。"""
