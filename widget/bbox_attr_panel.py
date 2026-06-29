@@ -221,11 +221,12 @@ class BboxAttributePanel(QWidget):
             if key != "class_name":
                 if bool(attr_def.get("allow_empty", True)):
                     combo.addItem("不写入", None)
-            combo.setEditable(key == "class_name")
+            combo.setEditable(False)
+            combo.setInsertPolicy(QComboBox.NoInsert)
             for value in options:
                 combo.addItem(value, value)
             combo.currentTextChanged.connect(self._on_attr_changed)
-            return combo, {"type": attr_type, "widget": combo}
+            return combo, {"type": attr_type, "widget": combo, "default": attr_def.get("default")}
         if attr_type == "check":
             widget = QWidget()
             widget.setObjectName("BboxAttributeOptions")
@@ -282,12 +283,12 @@ class BboxAttributePanel(QWidget):
             if attr_type == "select":
                 combo = control["widget"]
                 idx = combo.findData(value)
+                if idx < 0:
+                    idx = combo.findData(control.get("default"))
+                if idx < 0:
+                    idx = 0 if combo.count() else -1
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
-                elif key == "class_name":
-                    combo.setEditText(str(value))
-                else:
-                    combo.setCurrentIndex(0)
             elif attr_type == "check":
                 if not control.get("multi", True):
                     target = "不写入" if value is None else str(value)
@@ -369,7 +370,7 @@ class BboxAttributePanel(QWidget):
             if attr_type == "select":
                 value = control["widget"].currentData()
                 if key == "class_name":
-                    value = control["widget"].currentText().strip() or "others"
+                    value = value or "others"
                 self._bbox_info[key] = value
             elif attr_type == "check":
                 checked = [check.text() for check in control.get("checks", []) if check.isChecked()]

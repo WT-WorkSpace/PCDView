@@ -256,6 +256,8 @@ class PointCloudViewer(
         self.delete_shortcut.activated.connect(self._delete_selected_bbox)
         self.rotate_yaw_shortcut = QShortcut(QKeySequence(Qt.Key_C), self)
         self.rotate_yaw_shortcut.activated.connect(self._rotate_selected_bbox_yaw_90)
+        self.next_bbox_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        self.next_bbox_shortcut.activated.connect(self._show_next_bbox_three_view)
         # 主视图右上角 Save 按钮（修改框后显示）
         self.copy_prev_bboxes_btn = QPushButton("Copy Prev", self.glwidget)
         self.copy_prev_bboxes_btn.setStyleSheet(
@@ -585,6 +587,41 @@ class PointCloudViewer(
         values["class_name"] = values.get("class_name") or "others"
         return values
 
+    def _next_unique_bbox_id(self):
+        used = set()
+        max_int_id = 0
+        for info in self.current_bbox_infos:
+            text = self._bbox_id_key(info.get("id"))
+            if not text:
+                continue
+            used.add(text)
+            try:
+                int_value = int(text)
+            except ValueError:
+                continue
+            max_int_id = max(max_int_id, int_value)
+        candidate = max_int_id + 1
+        while str(candidate) in used:
+            candidate += 1
+        return candidate
+
+    @staticmethod
+    def _bbox_id_key(value):
+        if value in (None, ""):
+            return ""
+        return str(value).strip()
+
+    def _is_bbox_id_used_by_other(self, bbox_index, value):
+        target = self._bbox_id_key(value)
+        if not target:
+            return False
+        for i, info in enumerate(self.current_bbox_infos):
+            if i == bbox_index:
+                continue
+            if self._bbox_id_key(info.get("id")) == target:
+                return True
+        return False
+
     def _prune_bbox_attr_infos(self):
         keep = {
             "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
@@ -831,8 +868,16 @@ class PointCloudViewer(
             self._show_bbox_attr_panel(bbox_index, info)
 
     def _on_bbox_edited_from_panel(self, bbox_index, new_info):
-        """三视图中拖动修改框后，同步更新 current_bbox_infos 与主 3D 视图中该框的显示"""
+        """属性面板或三视图编辑后，同步更新 current_bbox_infos 与主 3D 视图。"""
         if bbox_index < 0 or bbox_index >= len(self.current_bbox_infos):
+            return
+        old_id = self.current_bbox_infos[bbox_index].get("id")
+        new_id = new_info.get("id")
+        if ("id" in new_info and
+                self._bbox_id_key(new_id) != self._bbox_id_key(old_id) and
+                self._is_bbox_id_used_by_other(bbox_index, new_id)):
+            QMessageBox.warning(self, "ID重复", "ID {} 已被使用，请输入未占用的 ID。".format(new_info.get("id")))
+            self._show_bbox_attr_panel(bbox_index, self.current_bbox_infos[bbox_index])
             return
         self.current_bbox_infos[bbox_index] = {**self.current_bbox_infos[bbox_index], **new_info}
         self._refresh_single_bbox_in_main_view(bbox_index)
@@ -866,6 +911,19 @@ class PointCloudViewer(
         self.bbox_modified = True
         self._show_save_button_if_modified()
         self.frame_info_label.setText("已将目标框 yaw 旋转 90 度")
+
+    def _show_next_bbox_three_view(self):
+        if self.selected_bbox_index is None:
+            return
+        if not self.current_bbox_infos or len(self.current_bbox_infos) < 2:
+            return
+        if not hasattr(self, "raw_points") or self.raw_points is None or len(self.raw_points) == 0:
+            return
+        current = self.selected_bbox_index
+        if current < 0 or current >= len(self.current_bbox_infos):
+            return
+        next_index = (current + 1) % len(self.current_bbox_infos)
+        self._show_bbox_info_dialog(next_index)
 
     def _normalize_yaw(self, yaw):
         return float((float(yaw) + np.pi) % (2.0 * np.pi) - np.pi)
@@ -1009,7 +1067,10 @@ class PointCloudViewer(
     def _append_bbox(self, x_c, y_c, z_c, l, w, h, yaw):
         """将拟合好的框追加到列表"""
         default_attrs = self._default_bbox_attr_values()
+        default_attrs["id"] = self._next_unique_bbox_id()
         class_name = default_attrs.get("class_name") or "others"
+        bbox_id = default_attrs.get("id")
+        str_id = str(bbox_id) if bbox_id is not None else "XX"
         if class_name in self.class_map.keys():
             bbox_color = self.class_map[class_name]
         else:
@@ -1018,7 +1079,7 @@ class PointCloudViewer(
         bbox = draw_bbox(x_c, y_c, z_c, l, w, h, yaw, color)
         arrow_yaw = self._bbox_arrow_yaw({"yaw": yaw})
         arrow = draw_arrow(np.array([x_c, y_c, z_c + h/2]), [np.cos(arrow_yaw), np.sin(arrow_yaw), 0], l/2, color)
-        vis_text = GLTextItem(text=class_name + "-new", pos=(x_c, y_c, z_c+1), color=color, font=QFont('Helvetica', 10))
+        vis_text = GLTextItem(text=class_name + "-" + str_id, pos=(x_c, y_c, z_c+1), color=color, font=QFont('Helvetica', 10))
         self.glwidget.addItem(bbox)
         self.glwidget.addItem(arrow)
         self.glwidget.addItem(vis_text)
