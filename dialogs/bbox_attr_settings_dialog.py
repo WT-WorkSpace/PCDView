@@ -35,7 +35,7 @@ class BboxAttrSettingsDialog(QDialog):
     def __init__(self, attr_defs=None, history_browse_enabled=False, parent=None):
         super().__init__(parent)
         self.setWindowFlag(Qt.Window, True)
-        self.setWindowTitle("标注设置")
+        self.setWindowTitle("自定义标注属性")
         self.resize(760, 440)
 
         layout = QVBoxLayout(self)
@@ -180,7 +180,7 @@ class BboxAttrSettingsDialog(QDialog):
         try:
             self._attr_defs = self._collect_defs()
         except ValueError as exc:
-            QMessageBox.warning(self, "标注设置", str(exc))
+            QMessageBox.warning(self, "自定义标注属性", str(exc))
             return
         self.accept()
 

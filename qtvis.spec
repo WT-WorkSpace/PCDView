@@ -12,6 +12,7 @@ a = Analysis(
         ('icons/fengguangming.ttf', 'icons'),
         ('icons/next.png', 'icons'),
         ('icons/open.svg', 'icons'),
+        ('icons/help.svg', 'icons'),
         ('icons/open_dir.svg', 'icons'),
         ('icons/box_selection.svg', 'icons'),
         ('icons/cancel_box_selection.svg', 'icons'),

@@ -3,9 +3,11 @@ import numpy as np
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QAbstractItemView,
-    QDockWidget,
     QHeaderView,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -28,10 +30,9 @@ class PointRectSelectMixin:
             self._restore_points_color_only()
             self.box_select_mode = False
             self.box_select_action.setChecked(False)
-            # 确保 Dock/label 已创建，避免 AttributeError
-            self._ensure_point_select_dock()
-            self.point_select_info_label.setText("已就绪：可框选点云")
-            self.frame_info_label.setText("点云框选：请拖拽一次矩形")
+            if self._point_select_dock is not None:
+                self.point_select_info_label.setText("已就绪：可框选点云")
+            self._set_status_message("点云框选：请拖拽一次矩形")
             self._update_points_rect_button_style(True)
         else:
             self.box_select_start = None
@@ -84,10 +85,27 @@ class PointRectSelectMixin:
     def _ensure_point_select_dock(self):
         if self._point_select_dock is not None:
             return
-        dock = QDockWidget("框选点云", self)
-        dock.setObjectName("PointRectSelectDock")
-        w = QWidget()
-        lay = QVBoxLayout(w)
+        panel = QWidget(self.splitter)
+        panel.setObjectName("PointRectSelectDock")
+        panel.setMinimumWidth(280)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        panel.hide()
+
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(6, 4, 6, 6)
+        lay.setSpacing(4)
+
+        title_lay = QHBoxLayout()
+        title_lay.setContentsMargins(0, 0, 0, 0)
+        title_label = QLabel("框选点云")
+        title_lay.addWidget(title_label, 1)
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(18, 18)
+        close_btn.setFlat(True)
+        close_btn.clicked.connect(self._clear_point_rect_selection)
+        title_lay.addWidget(close_btn)
+        lay.addLayout(title_lay)
+
         self.point_select_info_label = QLabel(
             "点击「点云框选」后，在主视图拖拽一次矩形；选中点为红色，下方表格查看各点字段。"
         )
@@ -102,11 +120,10 @@ class PointRectSelectMixin:
         # 允许用户点击表头对列排序（Qt 会在每次点击时在升/降之间切换）
         self.point_select_table.setSortingEnabled(True)
         lay.addWidget(self.point_select_table, 1)
-        dock.setWidget(w)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        # 首次创建时先隐藏：应在完成一次拖拽框选后再显示
-        dock.hide()
-        self._point_select_dock = dock
+        self.splitter.insertWidget(0, panel)
+        # 首次创建时保持隐藏：应在完成一次拖拽框选后再显示
+        panel.hide()
+        self._point_select_dock = panel
 
     def _reset_point_select_table_ui(self):
         if self._point_select_dock is None:
@@ -290,7 +307,7 @@ class PointRectSelectMixin:
         x_min, x_max = min(x1, x2), max(x1, x2)
         y_min, y_max = min(y1, y2), max(y1, y2)
         if not hasattr(self, "raw_points") or self.raw_points is None or len(self.raw_points) < 1:
-            self.frame_info_label.setText("无点云可框选")
+            self._set_status_message("无点云可框选")
             return
         pts_xyz = np.asarray(self.raw_points[:, :3], dtype=np.float64)
         mask = points_in_screen_rect(self.glwidget, pts_xyz, x_min, x_max, y_min, y_max)
@@ -298,16 +315,18 @@ class PointRectSelectMixin:
         # 拖拽完成后再弹出表格（点击框选按钮时不弹出）
         if self._point_select_dock is not None:
             self._point_select_dock.show()
+            if hasattr(self, "_resize_main_splitter"):
+                self._resize_main_splitter(point_width=380)
             self._point_select_dock.raise_()
         if not np.any(mask):
             self._points_rect_select_mask = None
             self._fill_point_select_table(mask)
-            self.frame_info_label.setText("框选区域内无点")
+            self._set_status_message("框选区域内无点")
             self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
             return
         self._points_rect_select_mask = mask
         self._fill_point_select_table(mask)
-        self.frame_info_label.setText("已框选 {} 个点".format(int(np.count_nonzero(mask))))
+        self._set_status_message("已框选 {} 个点".format(int(np.count_nonzero(mask))))
         self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
 
     def _clear_point_rect_selection(self):
@@ -326,4 +345,6 @@ class PointRectSelectMixin:
                 "点击「点云框选」后，在主视图拖拽一次矩形；选中点为红色，下方表格查看各点字段。"
             )
             self._point_select_dock.hide()
+            if hasattr(self, "_resize_main_splitter"):
+                self._resize_main_splitter(point_width=0)
         self._update_frame_info_label()

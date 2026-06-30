@@ -21,11 +21,12 @@ from PyQt5.QtCore import QTimer, Qt
 from utils.qt_utils import draw_arrow, draw_bbox, draw_bbox_solid, draw_arc_arrow, draw_arc_arrow_missing
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, QDialog, QFormLayout, QDialogButtonBox
-from PyQt5.QtWidgets import QLabel, QSizePolicy, QSlider, QMenuBar, QComboBox, QDoubleSpinBox
+from PyQt5.QtWidgets import QLabel, QSizePolicy, QSlider, QMenuBar, QComboBox, QDoubleSpinBox, QLineEdit
 from PyQt5.QtWidgets import QAction, QToolBar, QWidget, QPushButton, QColorDialog
 from PyQt5.QtWidgets import QSplitter, QFrame, QMessageBox, QShortcut, QDockWidget
 from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QAbstractItemView
 from PyQt5.QtWidgets import QHeaderView, QCheckBox, QSpinBox, QGroupBox, QGridLayout
+from PyQt5.QtWidgets import QTextBrowser
 from PyQt5.QtCore import QEvent, QSize
 from PyQt5.QtGui import QKeySequence, QPainter, QPen, QCursor
 from matplotlib.path import Path as MplPath
@@ -83,14 +84,15 @@ class PointCloudViewer(
         self.menu_bar = QMenuBar(self)
         self.setMenuBar(self.menu_bar)
 
-        # 主内容：左侧 3D+控制条，右侧为可显隐的三视图面板
+        # 主内容：上方为 3D 视图/三视图 splitter，下方为横跨全宽的播放控制条
         self.central_widget = QWidget()
-        main_h = QHBoxLayout(self.central_widget)
-        main_h.setContentsMargins(0, 0, 0, 0)
+        self.central_layout = QVBoxLayout(self.central_widget)
+        self.central_layout.setContentsMargins(0, 0, 0, 0)
+        self.central_layout.setSpacing(0)
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setChildrenCollapsible(False)
 
-        # 左侧容器：用于放 3D 视图和底部控制条（create_controls 里设置 layout）
+        # 左侧容器只放 3D 视图；底部播放条放在 central_widget 底部横跨全宽。
         self.left_widget = QWidget()
         self.left_widget.setMinimumWidth(400)
         self.splitter.addWidget(self.left_widget)
@@ -103,7 +105,7 @@ class PointCloudViewer(
         # 右侧面板隐藏时把空间全给左侧（左侧给足够大，右侧 0）
         self.splitter.setSizes([9999, 0])
 
-        main_h.addWidget(self.splitter)
+        self.central_layout.addWidget(self.splitter, 1)
         self.setCentralWidget(self.central_widget)
 
     def init_state(self):
@@ -113,6 +115,9 @@ class PointCloudViewer(
         self.playing = False  # Flag for play/pause state
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.next_frame)  # Timer action for auto-frame transition
+        self.key_frame_timer = QTimer(self)
+        self.key_frame_timer.timeout.connect(self._step_held_frame_key)
+        self._held_frame_key_direction = 0
         self.colors = QColor(0, 0, 255).getRgbF()
         # 纯色模式下用于每次 vis_fram 重建颜色；避免框选红色写入 self.colors 后无法恢复
         self._user_solid_rgbf = QColor(0, 0, 255).getRgbF()
@@ -157,7 +162,8 @@ class PointCloudViewer(
             "color_rgb": (180, 180, 180),
             "alpha": 100.0,
         }
-        self._add_plane_action = None
+        if not hasattr(self, "_add_plane_action"):
+            self._add_plane_action = None
 
         # Mask 绘制
         self._mask_items = []
@@ -208,29 +214,46 @@ class PointCloudViewer(
         self.last_mouse_pos = None
 
     def create_controls(self):
-        # 所有左侧控件父对象设为 left_widget，避免布局错乱和主视图空白
-        self.play_button = QPushButton(self.left_widget)
+        # 播放控制条属于 central_widget 底部，横跨 3D 视图和三视图面板。
+        self.play_button = QPushButton(self.central_widget)
         self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
         self.play_button.setIconSize(self.play_button.sizeHint())
         self.play_button.setFlat(True)
 
-        self.prev_button = QPushButton(self.left_widget)
+        self.prev_button = QPushButton(self.central_widget)
         self.prev_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/prev_pcd.png')))
         self.prev_button.setIconSize(self.prev_button.sizeHint() * 0.8)
         self.prev_button.setFlat(True)
 
-        self.next_button = QPushButton(self.left_widget)
+        self.next_button = QPushButton(self.central_widget)
         self.next_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/next.png')))
         self.next_button.setIconSize(self.next_button.sizeHint() * 0.8)
         self.next_button.setFlat(True)
 
         font = QFont("Arial", 10)
-        self.frame_info_label = QLabel("Frame: 0 / 0", self.left_widget)
+        self.frame_info_display_chars = 35
+        self.frame_info_label = QLabel("0 / 0", self.central_widget)
         self.frame_info_label.setFont(font)
+        self.frame_info_label.setAlignment(Qt.AlignCenter)
         self.frame_info_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        frame_info_width = self.frame_info_label.fontMetrics().horizontalAdvance(
+            "0" * self.frame_info_display_chars
+        )
+        self.frame_info_label.setFixedWidth(frame_info_width)
         self.frame_info_label.setMinimumHeight(int(font.pointSize() * 1.5))
 
-        self.frame_slider = QSlider(Qt.Horizontal, self.left_widget)
+        self.log_info_edit = QLineEdit(self.central_widget)
+        self.log_info_edit.setReadOnly(True)
+        self.log_info_edit.setFrame(False)
+        self.log_info_edit.setPlaceholderText("信息输出")
+        self.log_info_edit.setMinimumWidth(300)
+        self.log_info_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.log_info_edit.setMinimumHeight(int(font.pointSize() * 1.8))
+        self.log_info_edit.setStyleSheet(
+            "QLineEdit { border: none; background: transparent; padding-left: 4px; }"
+        )
+
+        self.frame_slider = QSlider(Qt.Horizontal, self.central_widget)
         self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(0)
         self.frame_slider.setValue(0)
@@ -239,18 +262,22 @@ class PointCloudViewer(
         self.frame_slider.valueChanged.connect(self.on_slider_value_changed)
 
         control_layout = QHBoxLayout()
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(0)
         control_layout.addWidget(self.prev_button)
         control_layout.addWidget(self.play_button)
         control_layout.addWidget(self.next_button)
-        control_layout.addWidget(self.frame_info_label)
-        control_layout.addWidget(self.frame_slider)
+        control_layout.addWidget(self.frame_info_label, 1)
+        control_layout.addWidget(self.frame_slider, 6)
+        control_layout.addWidget(self.log_info_edit, 1)
 
         # 将 3D 视图放入左侧容器，保证父子关系正确才能正常显示
         self.glwidget.setParent(self.left_widget)
         main_layout = QVBoxLayout(self.left_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         main_layout.addWidget(self.glwidget, 1)
-        main_layout.addLayout(control_layout)
+        self.central_layout.addLayout(control_layout)
 
         self.play_button.clicked.connect(self.toggle_play_pause)
         self.prev_button.clicked.connect(self.previous_frame)
@@ -278,6 +305,11 @@ class PointCloudViewer(
         self.prev_history_frame_shortcut.activated.connect(self.previous_frame)
         self.next_history_frame_shortcut = QShortcut(QKeySequence(Qt.SHIFT | Qt.Key_X), self)
         self.next_history_frame_shortcut.activated.connect(self.next_frame)
+        # Z/X 长按播放由 eventFilter 统一处理，避免 QShortcut 和按住定时器重复切帧。
+        self.prev_frame_shortcut.setEnabled(False)
+        self.next_frame_shortcut.setEnabled(False)
+        self.prev_history_frame_shortcut.setEnabled(False)
+        self.next_history_frame_shortcut.setEnabled(False)
         # 主视图右上角 Save 按钮（修改框后显示）
         self.copy_prev_bboxes_btn = QPushButton("Copy Prev", self.glwidget)
         self.copy_prev_bboxes_btn.setStyleSheet(
@@ -422,6 +454,8 @@ class PointCloudViewer(
         )
         self._extrinsic_calib_action.setCheckable(True)
         self.toolbar.addAction(self._extrinsic_calib_action)
+        self.toolbar.addSeparator()
+        self.toolbar.addAction(self.help_action)
 
         self.color_sidebar = QToolBar("colors", self)
         self.addToolBar(Qt.RightToolBarArea, self.color_sidebar)
@@ -430,6 +464,7 @@ class PointCloudViewer(
     def create_menus(self):
         self.create_file_menus()
         self.create_tools_menus()
+        self.create_help_menus()
 
     def create_file_menus(self):
         file_menu = self.menu_bar.addMenu("File")
@@ -464,7 +499,7 @@ class PointCloudViewer(
         )
         self._extrinsic_calib_menu_action.setCheckable(True)
         self._bbox_attr_settings_action = self.create_action(
-            "标注设置", "icons/add_bbox.svg", self._open_annotation_settings
+            "自定义标注属性", "icons/add_bbox.svg", self._open_annotation_settings
         )
         self.save_view_action = self.create_action("Save View", 'icons/save_view.svg', self.save_view)
         self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
@@ -480,6 +515,11 @@ class PointCloudViewer(
         tool_menu.addAction(self._bbox_attr_settings_action)
         tool_menu.addAction(self.save_view_action)
         tool_menu.addAction(self.load_view_action)
+
+    def create_help_menus(self):
+        help_menu = self.menu_bar.addMenu("Help")
+        self.help_action = self.create_action("功能说明", "icons/help.svg", self.show_help_manual)
+        help_menu.addAction(self.help_action)
 
     def _bbox_attr_config_path(self):
         return Path.home() / ".pcdview_bbox_attrs.json"
@@ -549,7 +589,7 @@ class PointCloudViewer(
         try:
             self._save_bbox_attr_defs()
         except Exception as exc:
-            QMessageBox.warning(self, "标注设置", "保存属性配置失败: {}".format(exc))
+            QMessageBox.warning(self, "自定义标注属性", "保存属性配置失败: {}".format(exc))
         if hasattr(self, "bbox_attr_panel"):
             self._prune_bbox_attr_infos()
             if self.current_bbox_infos:
@@ -668,6 +708,75 @@ class PointCloudViewer(
         action.triggered.connect(handler)
         return action
 
+    def show_help_manual(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Point Cloud Viewer 功能说明")
+        dlg.resize(760, 620)
+
+        browser = QTextBrowser(dlg)
+        browser.setOpenExternalLinks(False)
+        browser.setHtml("""
+        <h2>Point Cloud Viewer 功能说明</h2>
+
+        <h3>文件与数据</h3>
+        <ul>
+          <li><b>Open File</b>：打开单个 PCD 点云文件。</li>
+          <li><b>Open Directory</b>：打开点云目录，支持按帧播放和切换。</li>
+          <li><b>Open BBoxes Dir</b>：选择目标框 JSON 标注目录。</li>
+          <li><b>导入历史帧</b>：导入历史点云目录，导入成功后按钮蓝底表示已启用。</li>
+        </ul>
+
+        <h3>播放与切帧</h3>
+        <ul>
+          <li>底部播放栏用于上一帧、播放/暂停、下一帧和拖动帧进度。</li>
+          <li><b>Z</b>：上一帧；长按 Z 连续向前播放。</li>
+          <li><b>X</b>：下一帧；长按 X 连续向后播放。</li>
+          <li>底部帧信息固定显示 35 个字符，完整文件名可悬停查看。</li>
+        </ul>
+
+        <h3>视图与显示</h3>
+        <ul>
+          <li><b>Point Size + / -</b>：增大或减小点云点大小，最小点大小为 1。</li>
+          <li><b>Color</b>：选择点云颜色或字段映射颜色。</li>
+          <li><b>Coordinate</b>：显示或隐藏坐标轴。</li>
+          <li><b>Save View / Load View</b>：保存和加载当前视角。</li>
+        </ul>
+
+        <h3>标注与编辑</h3>
+        <ul>
+          <li><b>标注3D框</b>：在主视图拖拽矩形区域生成 3D 目标框。</li>
+          <li>点击目标框会打开右侧三视图和目标框属性面板。</li>
+          <li><b>Backspace</b>：删除当前选中的目标框。</li>
+          <li><b>C</b>：将当前选中目标框 yaw 旋转 90 度。</li>
+          <li><b>Space</b>：切换到下一个目标框三视图。</li>
+          <li><b>Save</b>：保存当前帧标注；<b>Copy Prev</b>：复制上一帧标注。</li>
+          <li><b>自定义标注属性</b>：配置目标框属性字段和历史帧显示模式。</li>
+        </ul>
+
+        <h3>点云框选</h3>
+        <ul>
+          <li><b>点云框选</b>：开启后在主视图拖拽一次矩形，选中点会高亮。</li>
+          <li>框选完成后左侧显示点字段表格，不会挤占底部播放条。</li>
+          <li><b>取消框选</b>：清除高亮并隐藏框选结果表格。</li>
+        </ul>
+
+        <h3>辅助功能</h3>
+        <ul>
+          <li><b>添加/取消平面</b>：显示或移除参考平面；启用时按钮蓝底。</li>
+          <li><b>显示/关闭 Mask</b>：显示 Mask 点线或按 Mask 过滤点云。</li>
+          <li><b>点云聚类</b>：对当前帧执行聚类并绘制聚类框；启用时按钮蓝底。</li>
+          <li><b>外参标定</b>：打开外参标定面板，对多雷达点云进行位姿调整和应用。</li>
+        </ul>
+        """)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, dlg)
+        buttons.rejected.connect(dlg.reject)
+
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(browser, 1)
+        layout.addWidget(buttons)
+        dlg.exec_()
+
     def eventFilter(self, obj, event):
         """鼠标在 3D 视图上：框选模式拖拽生成框；否则左键点击显示三视图，右键显示目标框信息"""
         if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Shift and not event.isAutoRepeat():
@@ -676,6 +785,8 @@ class PointCloudViewer(
         elif event.type() == QEvent.KeyRelease and event.key() == Qt.Key_Shift and not event.isAutoRepeat():
             self.history_shift_down = False
             self._hide_history_frames()
+        if self._handle_frame_key_event(event):
+            return True
         if obj != self.glwidget:
             return super().eventFilter(obj, event)
         if event.type() == QEvent.Resize:
@@ -739,7 +850,7 @@ class PointCloudViewer(
                 if dx > 5 and dy > 5:
                     self._apply_points_in_rect_from_drag(self.box_select_start[0], self.box_select_start[1], mx, my)
                 else:
-                    self.frame_info_label.setText("拖拽矩形过小，请点击「点云框选」再试一次")
+                    self._set_status_message("拖拽矩形过小，请点击「点云框选」再试一次")
                 self.box_select_start = None
                 self.box_select_start_logical = None
                 self.box_select_overlay.clear_rect()
@@ -906,8 +1017,7 @@ class PointCloudViewer(
             )
             self.bbox_three_views_panel.show()
             self.bbox_three_views_panel.setMinimumWidth(320)
-            total = self.splitter.width()
-            self.splitter.setSizes([max(400, total - 380), 380])
+            self._resize_main_splitter(three_width=380)
             self._show_bbox_attr_panel(bbox_index, info)
 
     def _on_bbox_edited_from_panel(self, bbox_index, new_info):
@@ -930,7 +1040,7 @@ class PointCloudViewer(
 
     def _rotate_selected_bbox_yaw_90(self):
         if self.selected_bbox_index is None:
-            self.frame_info_label.setText("请先选中一个目标框")
+            self._set_status_message("请先选中一个目标框")
             return
         idx = self.selected_bbox_index
         if idx < 0 or idx >= len(self.current_bbox_infos):
@@ -953,7 +1063,7 @@ class PointCloudViewer(
             )
         self.bbox_modified = True
         self._show_save_button_if_modified()
-        self.frame_info_label.setText("已将目标框 yaw 旋转 90 度")
+        self._set_status_message("已将目标框 yaw 旋转 90 度")
 
     def _show_next_bbox_three_view(self):
         if self.selected_bbox_index is None:
@@ -1037,6 +1147,40 @@ class PointCloudViewer(
         if hasattr(self, "bbox_attr_panel"):
             self.bbox_attr_panel.clear_bbox()
             self.bbox_attr_panel.hide()
+        self._resize_main_splitter(three_width=0)
+
+    def _resize_main_splitter(self, point_width=None, three_width=None):
+        """调整上方 splitter，不影响底部播放条。"""
+        if not hasattr(self, "splitter"):
+            return
+        count = self.splitter.count()
+        total = max(self.splitter.width(), 1)
+        sizes = self.splitter.sizes()
+        point_panel = getattr(self, "_point_select_dock", None)
+
+        if count == 2:
+            right_visible = self.bbox_three_views_panel.isVisible()
+            right_w = three_width if three_width is not None else (sizes[1] if right_visible else 0)
+            if not right_visible:
+                right_w = 0
+            self.splitter.setSizes([max(400, total - int(right_w)), int(right_w)])
+            return
+
+        if count != 3:
+            return
+
+        point_visible = point_panel is not None and point_panel.isVisible()
+        right_visible = self.bbox_three_views_panel.isVisible()
+        point_w = point_width if point_width is not None else (sizes[0] if point_visible else 0)
+        right_w = three_width if three_width is not None else (sizes[2] if right_visible else 0)
+        if not point_visible:
+            point_w = 0
+        if not right_visible:
+            right_w = 0
+        point_w = int(max(0, point_w))
+        right_w = int(max(0, right_w))
+        center_w = int(max(400, total - point_w - right_w))
+        self.splitter.setSizes([point_w, center_w, right_w])
 
     def _delete_selected_bbox(self):
         """Backspace 删除当前选中的目标框"""
@@ -1073,7 +1217,7 @@ class PointCloudViewer(
             self.points_rect_select_mode = False
             if hasattr(self, "points_rect_select_action"):
                 self.points_rect_select_action.setChecked(False)
-            self.frame_info_label.setText("框选模式：在视图中拖拽绘制矩形区域")
+            self._set_status_message("框选模式：在视图中拖拽绘制矩形区域")
         else:
             self.box_select_start = None
             self.box_select_start_logical = None
@@ -1145,7 +1289,7 @@ class PointCloudViewer(
         if (not self.bbox_three_views_panel.isVisible() or
                 getattr(self.bbox_three_views_panel, "_bbox_index", None) != self.selected_bbox_index):
             self._show_bbox_attr_panel(self.selected_bbox_index, info)
-        self.frame_info_label.setText(f"已添加新框，共 {len(self.current_bbox_infos)} 个")
+        self._set_status_message(f"已添加新框，共 {len(self.current_bbox_infos)} 个")
         self.bbox_modified = True
         self._show_save_button_if_modified()
 
@@ -1156,7 +1300,7 @@ class PointCloudViewer(
     def _save_current_bboxes(self, show_message=False):
         """保存当前帧 bbox；返回是否保存成功。"""
         if not self._ensure_bbox_save_path():
-            self.frame_info_label.setText("已取消选择目标框保存地址")
+            self._set_status_message("已取消选择目标框保存地址")
             return False
         try:
             save_bboxes_to_tanway_json(
@@ -1168,10 +1312,10 @@ class PointCloudViewer(
             self.save_bboxes_btn.hide()
             if hasattr(self, "bbox_attr_panel"):
                 self.bbox_attr_panel.raise_()
-            self.frame_info_label.setText(f"已保存到 {os.path.basename(self.json_path)}")
+            self._set_status_message(f"已保存到 {os.path.basename(self.json_path)}")
             return True
         except Exception as e:
-            self.frame_info_label.setText(f"保存失败: {e}")
+            self._set_status_message(f"保存失败: {e}")
             if show_message:
                 QMessageBox.warning(self, "保存失败", str(e))
             return False
@@ -1188,7 +1332,7 @@ class PointCloudViewer(
         self.bboxes_directory = directory
         self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem) + ".json")
         self.original_json_agents = load_json(self.json_path) if os.path.isfile(self.json_path) else None
-        self.frame_info_label.setText(f"目标框将保存到 {os.path.basename(self.json_path)}")
+        self._set_status_message(f"目标框将保存到 {os.path.basename(self.json_path)}")
         return True
 
     def _ensure_bboxes_directory(self):
@@ -1273,7 +1417,7 @@ class PointCloudViewer(
 
     def _copy_previous_frame_bboxes(self):
         if not getattr(self, "point_cloud_files", None) or self.current_frame_index <= 0:
-            self.frame_info_label.setText("当前没有上一帧可复制")
+            self._set_status_message("当前没有上一帧可复制")
             return
         if self.current_bbox_infos:
             ret = QMessageBox.question(
@@ -1286,7 +1430,7 @@ class PointCloudViewer(
             if ret != QMessageBox.Yes:
                 return
         if not self._ensure_bboxes_directory():
-            self.frame_info_label.setText("已取消选择目标框保存地址")
+            self._set_status_message("已取消选择目标框保存地址")
             return
         prev_pcd = self.point_cloud_files[self.current_frame_index - 1]
         prev_json_path = os.path.join(str(self.bboxes_directory), str(Path(prev_pcd).stem) + ".json")
@@ -1300,18 +1444,24 @@ class PointCloudViewer(
             self._redraw_current_bboxes()
             self.bbox_modified = True
             self._show_save_button_if_modified()
-            self.frame_info_label.setText(f"已复制上一帧标注，共 {len(self.current_bbox_infos)} 个框")
+            self._set_status_message(f"已复制上一帧标注，共 {len(self.current_bbox_infos)} 个框")
         except Exception as e:
             QMessageBox.warning(self, "复制失败", str(e))
 
     def _save_current_bboxes_if_modified(self, force_save=False):
         if not getattr(self, "bbox_modified", False) and not force_save:
             return True
-        if force_save and not self.current_bbox_infos and not getattr(self, "json_path", None) and not getattr(self, "bboxes_directory", None):
+        if not self.current_bbox_infos and not getattr(self, "json_path", None) and not getattr(self, "bboxes_directory", None):
+            self.bbox_modified = False
+            if hasattr(self, "save_bboxes_btn"):
+                self.save_bboxes_btn.hide()
             return True
         ok = self._save_current_bboxes(show_message=True)
         if not ok:
             self.timer.stop()
+            if hasattr(self, "key_frame_timer"):
+                self.key_frame_timer.stop()
+                self._held_frame_key_direction = 0
             self.playing = False
             self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
         return ok
@@ -1326,12 +1476,12 @@ class PointCloudViewer(
         for sx, sy in corners_screen:
             ray = ray_from_screen(self.glwidget, sx, sy)
             if ray is None:
-                self.frame_info_label.setText("投影失败，无法生成框")
+                self._set_status_message("投影失败，无法生成框")
                 return
             origin, direction = ray
             pt = ray_plane_z_intersect(origin, direction, z_plane)
             if pt is None:
-                self.frame_info_label.setText("投影失败，无法生成框")
+                self._set_status_message("投影失败，无法生成框")
                 return
             pts_3d.append(pt)
         pts_3d = np.array(pts_3d)
@@ -1395,12 +1545,44 @@ class PointCloudViewer(
     def _update_frame_info_label(self):
         """更新底部帧信息标签"""
         if self.point_cloud_files and 0 <= self.current_frame_index < len(self.point_cloud_files):
-            self.frame_info_label.setText(
-                f"Frame: {self.current_frame_index + 1} / {len(self.point_cloud_files)} ({self.point_cloud_files[self.current_frame_index]})")
+            self._set_frame_info_text(
+                f"{self.current_frame_index + 1} / {len(self.point_cloud_files)} ({self.point_cloud_files[self.current_frame_index]})")
         elif self.point_cloud_files:
-            self.frame_info_label.setText(f"Frame: {self.current_frame_index + 1} / {len(self.point_cloud_files)}")
+            self._set_frame_info_text(f"{self.current_frame_index + 1} / {len(self.point_cloud_files)}")
         else:
-            self.frame_info_label.setText("Point Cloud Viewer")
+            self._set_frame_info_text("Point Cloud Viewer")
+
+    def _set_frame_info_text(self, text):
+        full_text = str(text)
+        display_chars = getattr(self, "frame_info_display_chars", 35)
+        if len(full_text) > display_chars:
+            display_text = full_text[:max(0, display_chars - 3)] + "..."
+        else:
+            display_text = full_text
+        self.frame_info_label.setText(display_text)
+        self.frame_info_label.setToolTip(full_text)
+
+    def _set_status_message(self, message):
+        """将非帧播放信息写入底部右侧信息框。"""
+        if hasattr(self, "log_info_edit"):
+            self.log_info_edit.setText(str(message))
+
+    def _set_toolbar_action_active(self, action, active):
+        if action is None or not hasattr(self, "toolbar"):
+            return
+        btn = self.toolbar.widgetForAction(action)
+        if btn is None:
+            return
+        if active:
+            btn.setStyleSheet(
+                "QToolButton { background-color: #2196F3; color: white; "
+                "border-radius: 6px; padding: 6px 10px; }"
+            )
+        else:
+            btn.setStyleSheet(
+                "QToolButton { background-color: transparent; "
+                "border-radius: 6px; padding: 6px 10px; }"
+            )
 
     def _set_topdown_view(self):
         """设置相机为俯视图"""
@@ -1424,7 +1606,7 @@ class PointCloudViewer(
                 self.frame_slider.setMaximum(0)
                 self.frame_slider.setValue(0)
                 self.frame_slider.blockSignals(False)
-                self.frame_info_label.setText("所选目录中没有 .txt 或 .pcd 点云文件")
+                self._set_status_message("所选目录中没有 .txt 或 .pcd 点云文件")
                 QMessageBox.warning(self, "打开目录失败", "所选目录中没有 .txt 或 .pcd 点云文件")
                 return
             self.current_frame_index = 0
@@ -1446,7 +1628,7 @@ class PointCloudViewer(
         if self.bboxes_directory:
             self.bboxes_files = natsorted([f for f in os.listdir(self.bboxes_directory) if f.endswith('.json')])
             if not self.point_cloud_files or self.current_frame_index < 0:
-                self.frame_info_label.setText("已选择目标框目录，请先打开点云目录或点云文件")
+                self._set_status_message("已选择目标框目录，请先打开点云目录或点云文件")
                 return
             self.load_frame()
 
@@ -1461,7 +1643,8 @@ class PointCloudViewer(
         self.history_browse_index = 0
         self._hide_history_frames()
         count = sum(len(files) for files in self.history_frame_index.values())
-        self.frame_info_label.setText("已导入历史帧目录：{}，匹配组 {} 个，文件 {} 个。按住 Shift 显示历史帧。".format(
+        self._set_toolbar_action_active(self.open_history_frames_action, True)
+        self._set_status_message("已导入历史帧目录：{}，匹配组 {} 个，文件 {} 个。按住 Shift 显示历史帧。".format(
             os.path.basename(directory), len(self.history_frame_index), count
         ))
         if QApplication.keyboardModifiers() & Qt.ShiftModifier:
@@ -1476,7 +1659,7 @@ class PointCloudViewer(
         self.history_browse_index = 0
         self._hide_history_frames()
         mode_text = "播放模式：按住 Shift 后左键下一帧、右键上一帧" if browse_enabled else "叠加模式：按住 Shift 显示所有历史帧"
-        self.frame_info_label.setText("历史帧{}".format(mode_text))
+        self._set_status_message("历史帧{}".format(mode_text))
         if self.history_shift_down:
             self._refresh_history_frame_visibility()
 
@@ -1611,7 +1794,7 @@ class PointCloudViewer(
         if not files:
             key = self._current_history_key()
             self._restore_main_frame_scatter_after_history()
-            self.frame_info_label.setText("当前帧无匹配历史帧：{}".format(key or "-"))
+            self._set_status_message("当前帧无匹配历史帧：{}".format(key or "-"))
             return
         if self.history_display_mode == "browse":
             self._show_history_browse_frame(files)
@@ -1619,13 +1802,13 @@ class PointCloudViewer(
         points = self._load_current_history_points()
         if points is None or len(points) == 0:
             self._restore_main_frame_scatter_after_history()
-            self.frame_info_label.setText("当前帧历史帧为空或加载失败")
+            self._set_status_message("当前帧历史帧为空或加载失败")
             return
         rgba = np.tile(np.array([[1.0, 0.62, 0.05, 0.38]], dtype=np.float32), (len(points), 1))
         size = max(float(self.point_size) * 0.75, 0.5)
         self.history_scatter = GLScatterPlotItem(pos=points, color=rgba, size=size)
         self.glwidget.addItem(self.history_scatter)
-        self.frame_info_label.setText("已叠加显示 {} 帧历史帧，共 {} 个点".format(len(files), len(points)))
+        self._set_status_message("已叠加显示 {} 帧历史帧，共 {} 个点".format(len(files), len(points)))
 
     def _show_history_browse_frame(self, files):
         if not files:
@@ -1635,12 +1818,12 @@ class PointCloudViewer(
         path = files[self.history_browse_index]
         points = self._load_history_points_file(path)
         if points is None or len(points) == 0:
-            self.frame_info_label.setText("历史帧加载失败：{}".format(os.path.basename(path)))
+            self._set_status_message("历史帧加载失败：{}".format(os.path.basename(path)))
             return
         rgba = np.tile(np.array([[1.0, 0.62, 0.05, 0.95]], dtype=np.float32), (len(points), 1))
         self.history_scatter = GLScatterPlotItem(pos=points, color=rgba, size=self.point_size)
         self.glwidget.addItem(self.history_scatter)
-        self.frame_info_label.setText("历史帧浏览 {}/{}：{}，左键下一帧，右键上一帧".format(
+        self._set_status_message("历史帧浏览 {}/{}：{}，左键下一帧，右键上一帧".format(
             self.history_browse_index + 1, len(files), os.path.basename(path)
         ))
 
@@ -1679,18 +1862,25 @@ class PointCloudViewer(
             self.vis_fram(updata_color_bar=True)
             self._set_topdown_view()
 
-    def increase_points_size(self):
-        self.point_size = self.point_size + 1
+    def _point_size_step(self):
+        size = float(self.point_size)
+        if size < 3.0:
+            return 0.25
+        return 0.5
+
+    def _set_point_size(self, size):
+        self.point_size = round(max(1.0, float(size)), 2)
         self.vis_fram()
+        self._set_status_message("点大小: {:.2f}".format(self.point_size))
+
+    def increase_points_size(self):
+        self._set_point_size(float(self.point_size) + self._point_size_step())
 
     def decrease_points_size(self):
-        if self.point_size <= 1:
-            self.point_size = self.point_size - 0.3
-        else:
-            self.point_size = self.point_size - 1
-        if self.point_size <= 0:
-            self.point_size = 0
-        self.vis_fram()
+        if float(self.point_size) <= 1.0:
+            self._set_status_message("点大小已是最小值: 1.00")
+            return
+        self._set_point_size(float(self.point_size) - self._point_size_step())
 
     def load_frame(self):
         import time
@@ -1699,7 +1889,7 @@ class PointCloudViewer(
         if (not self.point_cloud_files or self.directory is None or
                 self.current_frame_index < 0 or
                 self.current_frame_index >= len(self.point_cloud_files)):
-            self.frame_info_label.setText("当前没有可加载的点云帧")
+            self._set_status_message("当前没有可加载的点云帧")
             return False
         self.pcd_file = os.path.join(self.directory, self.point_cloud_files[self.current_frame_index])
         self.raw_points, self.structured_points, metadata = get_points_from_pcd_file(self.pcd_file)
@@ -1716,8 +1906,8 @@ class PointCloudViewer(
 
         self.vis_fram(updata_color_bar=metadata_changed)
         end1_time = time.time()
-        self.frame_info_label.setText(
-            f"Frame: {self.current_frame_index + 1} / {len(self.point_cloud_files)} ({self.point_cloud_files[self.current_frame_index]})")
+        self._set_frame_info_text(
+            f"{self.current_frame_index + 1} / {len(self.point_cloud_files)} ({self.point_cloud_files[self.current_frame_index]})")
         self.frame_slider.setValue(self.current_frame_index)
         self._update_save_button_geometry()
 
@@ -1755,21 +1945,79 @@ class PointCloudViewer(
             self.playing = False
             self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
 
+    def _handle_frame_key_event(self, event):
+        if event.type() not in (QEvent.KeyPress, QEvent.KeyRelease):
+            return False
+        if event.key() not in (Qt.Key_Z, Qt.Key_X):
+            return False
+        if self._frame_key_should_be_ignored():
+            if event.type() == QEvent.KeyRelease:
+                self._stop_frame_key_playback()
+            return False
+        if event.isAutoRepeat():
+            return True
+        if event.type() == QEvent.KeyPress:
+            direction = -1 if event.key() == Qt.Key_Z else 1
+            self._start_frame_key_playback(direction)
+        else:
+            self._stop_frame_key_playback()
+        return True
+
+    def _frame_key_should_be_ignored(self):
+        focus = QApplication.focusWidget()
+        if focus is None or focus is self.glwidget:
+            return False
+        return isinstance(focus, (QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox))
+
+    def _start_frame_key_playback(self, direction):
+        if direction not in (-1, 1):
+            return
+        self.timer.stop()
+        self.playing = False
+        self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
+        self._held_frame_key_direction = direction
+        self._step_held_frame_key()
+        if self._held_frame_key_direction != 0:
+            self.key_frame_timer.start(100)
+
+    def _stop_frame_key_playback(self):
+        self.key_frame_timer.stop()
+        self._held_frame_key_direction = 0
+
+    def _step_held_frame_key(self):
+        if self._held_frame_key_direction < 0:
+            if self._is_history_browse_active():
+                self._step_history_browse_frame(-1)
+            elif self.current_frame_index > 0:
+                if not self._change_frame(self.current_frame_index - 1, force_save=False):
+                    self._stop_frame_key_playback()
+            else:
+                self._stop_frame_key_playback()
+        elif self._held_frame_key_direction > 0:
+            if self._is_history_browse_active():
+                self._step_history_browse_frame(1)
+            elif self.current_frame_index < len(self.point_cloud_files) - 1:
+                if not self._change_frame(self.current_frame_index + 1, force_save=False):
+                    self._stop_frame_key_playback()
+            else:
+                self._stop_frame_key_playback()
+
     def _change_frame(self, target_index, force_save=False):
         if target_index == self.current_frame_index:
-            return
+            return False
         if target_index < 0 or target_index >= len(self.point_cloud_files):
-            return
+            return False
         if not self._save_current_bboxes_if_modified(force_save=force_save):
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(self.current_frame_index)
             self.frame_slider.blockSignals(False)
-            return
+            return False
         self.current_frame_index = target_index
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(self.current_frame_index)
         self.frame_slider.blockSignals(False)
         self.load_frame()
+        return True
 
     def toggle_play_pause(self):
         if self._is_history_browse_active():
@@ -2324,6 +2572,7 @@ class PointCloudViewer(
         self._cluster_current_frame()
         if hasattr(self, "_cluster_action"):
             self._cluster_action.setChecked(True)
+            self._set_toolbar_action_active(self._cluster_action, True)
 
     def _disable_cluster(self):
         """关闭聚类效果并清理聚类框/高亮。"""
@@ -2332,7 +2581,10 @@ class PointCloudViewer(
         self._cluster_select_mask = None
         self._clear_cluster_bboxes()
         self.vis_fram(preserve_current_bboxes=True)
-        self.frame_info_label.setText("已关闭点云聚类")
+        self._set_status_message("已关闭点云聚类")
+        if hasattr(self, "_cluster_action"):
+            self._cluster_action.setChecked(False)
+            self._set_toolbar_action_active(self._cluster_action, False)
 
     def _toggle_cluster_from_toolbar(self, checked=None):
         """工具栏聚类按钮：单击启用聚类，再次单击关闭聚类。"""
@@ -2345,6 +2597,7 @@ class PointCloudViewer(
             self._open_cluster_dialog()
             if not self._cluster_enabled:
                 self._cluster_action.setChecked(prev_enabled)
+                self._set_toolbar_action_active(self._cluster_action, prev_enabled)
         else:
             self._disable_cluster()
 
@@ -2361,33 +2614,33 @@ class PointCloudViewer(
     def _cluster_current_frame(self):
         """对当前帧点云做 DBSCAN 聚类并绘制 bbox(x,y,z,l,w,h,yaw)。"""
         if not hasattr(self, "raw_points") or self.raw_points is None or len(self.raw_points) == 0:
-            self.frame_info_label.setText("当前帧点云为空")
+            self._set_status_message("当前帧点云为空")
             return
         params = dict(getattr(self, "_cluster_params", {}))
         self._clear_cluster_bboxes()
-        self.frame_info_label.setText("聚类中...")
+        self._set_status_message("聚类中...")
         QApplication.processEvents()
         cluster_points = self._points_for_cluster()
         if cluster_points is None or len(cluster_points) == 0:
-            self.frame_info_label.setText("当前可聚类点云为空")
+            self._set_status_message("当前可聚类点云为空")
             self._cluster_select_mask = None
             self._selected_cluster_bbox_index = None
             return
         try:
             boxes, roi_mask = self._obstacle_cluster.cluster(cluster_points, params)
         except Exception as e:
-            self.frame_info_label.setText(f"聚类失败: {e}")
+            self._set_status_message(f"聚类失败: {e}")
             self._cluster_select_mask = None
             self._selected_cluster_bbox_index = None
             return
 
         if len(roi_mask) > 0 and params.get("use_roi", True) and not np.any(roi_mask):
-            self.frame_info_label.setText("ROI 区域内没有点云，无法聚类")
+            self._set_status_message("ROI 区域内没有点云，无法聚类")
             self._cluster_select_mask = None
             self._selected_cluster_bbox_index = None
             return
         if not boxes:
-            self.frame_info_label.setText("未检测到有效聚类")
+            self._set_status_message("未检测到有效聚类")
             self._cluster_select_mask = None
             self._selected_cluster_bbox_index = None
             return
@@ -2416,7 +2669,7 @@ class PointCloudViewer(
 
         stats = getattr(self._obstacle_cluster, "last_stats", {}) or {}
         limited_text = "，已限流" if stats.get("limited") else ""
-        self.frame_info_label.setText(
+        self._set_status_message(
             "聚类完成：{} 个包围框；ROI {} 点，下采样 {} 点，参与 {} 点{}".format(
                 len(self._cluster_bbox_items),
                 stats.get("roi_points", "-"),

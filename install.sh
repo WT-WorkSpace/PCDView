@@ -22,6 +22,7 @@ python -m PyInstaller --onefile --windowed \
   --add-data "icons/next.png:icons" \
   --add-data "icons/open.svg:icons" \
   --add-data "icons/history.svg:icons" \
+  --add-data "icons/help.svg:icons" \
   --add-data "icons/open_dir.svg:icons" \
   --add-data "icons/box_selection.svg:icons" \
   --add-data "icons/cancel_box_selection.svg:icons" \

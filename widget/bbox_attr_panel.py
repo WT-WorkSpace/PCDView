@@ -95,7 +95,7 @@ class BboxAttributePanel(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         self.title_label = QLabel("未选择目标框")
         self.title_label.setObjectName("BboxAttributeTitle")
-        self.settings_btn = QPushButton("标注设置")
+        self.settings_btn = QPushButton("自定义标注属性")
         self.settings_btn.setObjectName("BboxAttrSettingsButton")
         self.settings_btn.clicked.connect(self.attrSettingsRequested.emit)
         header_layout.addWidget(self.title_label, 1)
@@ -148,8 +148,8 @@ class BboxAttributePanel(QWidget):
         self._bbox_info = dict(bbox_info or {})
         self._on_bbox_edited = on_bbox_edited
         self.set_attr_defs(attr_defs)
-        title_index = bbox_index + 1 if bbox_index is not None else "-"
-        self.title_label.setText("Cuboid {}  目标框属性".format(title_index))
+        # title_index = bbox_index + 1 if bbox_index is not None else "-"
+        self.title_label.setText("目标框属性")
         self._set_controls_enabled(True)
         self._sync_controls(class_names)
 

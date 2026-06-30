@@ -225,7 +225,7 @@ class ExtrinsicCalibMixin:
         self._extrinsic_refresh_ui_from_state()
         self._extrinsic_dock.show()
         self._update_extrinsic_button_style(True)
-        self.frame_info_label.setText(
+        self._set_status_message(
             "外参标定：在主视图调节各雷达位姿，完成后点击「应用校正」"
         )
         self.vis_fram(updata_color_bar=False)

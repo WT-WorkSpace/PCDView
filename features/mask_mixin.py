@@ -137,15 +137,15 @@ class MaskMixin:
                 if self._mask_toggle_action is not None:
                     self._mask_toggle_action.setChecked(False)
                 self._mask_visible = False
-                self.frame_info_label.setText(msg)
+                self._set_status_message(msg)
                 QMessageBox.warning(self, "Mask", msg)
                 return
             self._mask_visible = True
-            self.frame_info_label.setText(msg)
+            self._set_status_message(msg)
         else:
             self._clear_mask_items()
             self._mask_visible = False
-            self.frame_info_label.setText("Mask已关闭")
+            self._set_status_message("Mask已关闭")
 
     def _open_mask_settings(self):
         def _on_change_live(new_params, _key):
@@ -189,6 +189,6 @@ class MaskMixin:
         # 若当前Mask处于显示状态，参数修改后立即重建生效
         if self._mask_visible:
             ok, msg = self._rebuild_mask()
-            self.frame_info_label.setText(msg)
+            self._set_status_message(msg)
         # 保证“仅保留圈内点”在确认后立即生效
         self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)

@@ -9,11 +9,19 @@ from dialogs.plane_param_dialog import PlaneParamDialog
 class PlaneMixin:
     def _toggle_add_plane(self, checked=False):
         """添加/移除平面（用于工具栏按钮：点击一次出现，点击一次消失）"""
+        action = self.sender() or getattr(self, "_add_plane_action", None)
         if checked:
             # 只用当前参数创建，不弹对话框
             self._create_plane_from_params(self._plane_params)
+            active = self._plane_item is not None
+            if action is not None:
+                action.setChecked(active)
+            if hasattr(self, "_set_toolbar_action_active"):
+                self._set_toolbar_action_active(action, active)
         else:
             self._remove_plane()
+            if hasattr(self, "_set_toolbar_action_active"):
+                self._set_toolbar_action_active(action, False)
 
     def _open_plane_param_dialog(self):
         """弹出修改平面参数窗口，返回参数字典；取消返回 None。"""
@@ -120,4 +128,3 @@ class PlaneMixin:
             self._plane_item = mesh
 
         self.glwidget.update()
-
