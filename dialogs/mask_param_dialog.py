@@ -12,7 +12,9 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
+    QSpinBox,
 )
 
 
@@ -75,10 +77,53 @@ class MaskParamDialog(QDialog):
         self.keep_inside_checkbox.stateChanged.connect(lambda *_: self._emit_change("keep_inside_points"))
         layout.addRow("", self.keep_inside_checkbox)
 
+        self.export_x_min_spin = QDoubleSpinBox(self)
+        self.export_x_min_spin.setDecimals(3)
+        self.export_x_min_spin.setRange(-1e6, 1e6)
+        self.export_x_min_spin.setValue(float(self._params.get("export_x_min", -40.0)))
+        self.export_x_max_spin = QDoubleSpinBox(self)
+        self.export_x_max_spin.setDecimals(3)
+        self.export_x_max_spin.setRange(-1e6, 1e6)
+        self.export_x_max_spin.setValue(float(self._params.get("export_x_max", 110.0)))
+        x_range_row = QHBoxLayout()
+        x_range_row.addWidget(self.export_x_min_spin)
+        x_range_row.addWidget(QLabel("到"))
+        x_range_row.addWidget(self.export_x_max_spin)
+        layout.addRow("导出X轴范围", x_range_row)
+
+        self.export_y_min_spin = QDoubleSpinBox(self)
+        self.export_y_min_spin.setDecimals(3)
+        self.export_y_min_spin.setRange(-1e6, 1e6)
+        self.export_y_min_spin.setValue(float(self._params.get("export_y_min", -70.0)))
+        self.export_y_max_spin = QDoubleSpinBox(self)
+        self.export_y_max_spin.setDecimals(3)
+        self.export_y_max_spin.setRange(-1e6, 1e6)
+        self.export_y_max_spin.setValue(float(self._params.get("export_y_max", 80.0)))
+        y_range_row = QHBoxLayout()
+        y_range_row.addWidget(self.export_y_min_spin)
+        y_range_row.addWidget(QLabel("到"))
+        y_range_row.addWidget(self.export_y_max_spin)
+        layout.addRow("导出Y轴范围", y_range_row)
+
+        self.export_pixel_spin = QSpinBox(self)
+        self.export_pixel_spin.setRange(1, 1000)
+        self.export_pixel_spin.setValue(int(self._params.get("export_pixel", 15)))
+        layout.addRow("导出像素(份/m)", self.export_pixel_spin)
+
+        self.export_tanway_btn = QPushButton("导出tanway_txt")
+        self.export_tanway_btn.clicked.connect(self._export_tanway_txt)
+        self.export_npy_btn = QPushButton("导出npy")
+        self.export_npy_btn.clicked.connect(self._export_npy)
+        export_row = QHBoxLayout()
+        export_row.addWidget(self.export_tanway_btn)
+        export_row.addWidget(self.export_npy_btn)
+        layout.addRow("", export_row)
+
         self.info_label = QLabel("")
         self.info_label.setWordWrap(True)
         layout.addRow("文件信息", self.info_label)
         self._update_json_info()
+        self._apply_export_defaults_from_json(force=False)
 
         self.btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
         self.btn_box.accepted.connect(self.accept)
@@ -96,6 +141,7 @@ class MaskParamDialog(QDialog):
         if path:
             self.json_path_edit.setText(path)
             self._update_json_info()
+            self._apply_export_defaults_from_json(force=True)
             self._emit_change("json_path")
 
     def _pick_point_color(self):
@@ -125,6 +171,42 @@ class MaskParamDialog(QDialog):
         except Exception as e:
             self.info_label.setText("JSON读取失败: %s" % e)
 
+    def _apply_export_defaults_from_json(self, force=False):
+        path = self.json_path_edit.text().strip()
+        if not path or path == "未选择" or not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+
+        pcd_range = data.get("pcd_range")
+        if isinstance(pcd_range, list) and len(pcd_range) >= 4:
+            if force or not any(k in self._params for k in ("export_x_min", "export_x_max", "export_y_min", "export_y_max")):
+                self.export_x_min_spin.setValue(float(pcd_range[0]))
+                self.export_y_min_spin.setValue(float(pcd_range[1]))
+                self.export_x_max_spin.setValue(float(pcd_range[2]))
+                self.export_y_max_spin.setValue(float(pcd_range[3]))
+
+        img_resolution = data.get("img_resolution")
+        if img_resolution is not None and (force or "export_pixel" not in self._params):
+            self.export_pixel_spin.setValue(max(1, int(float(img_resolution))))
+
+    def _export_tanway_txt(self):
+        parent = self.parent()
+        if parent is None or not hasattr(parent, "_export_mask_tanway_txt"):
+            QMessageBox.warning(self, "导出tanway_txt", "当前窗口不支持导出。")
+            return
+        parent._export_mask_tanway_txt(self.get_params())
+
+    def _export_npy(self):
+        parent = self.parent()
+        if parent is None or not hasattr(parent, "_export_mask_npy"):
+            QMessageBox.warning(self, "导出npy", "当前窗口不支持导出。")
+            return
+        parent._export_mask_npy(self.get_params())
+
     def get_params(self):
         return {
             "json_path": self.json_path_edit.text().strip() if self.json_path_edit.text().strip() != "未选择" else "",
@@ -134,6 +216,11 @@ class MaskParamDialog(QDialog):
             "point_color": (self._point_color.red(), self._point_color.green(), self._point_color.blue()),
             "line_color": (self._line_color.red(), self._line_color.green(), self._line_color.blue()),
             "keep_inside_points": bool(self.keep_inside_checkbox.isChecked()),
+            "export_x_min": float(self.export_x_min_spin.value()),
+            "export_x_max": float(self.export_x_max_spin.value()),
+            "export_y_min": float(self.export_y_min_spin.value()),
+            "export_y_max": float(self.export_y_max_spin.value()),
+            "export_pixel": int(self.export_pixel_spin.value()),
         }
 
     def _emit_change(self, key):
@@ -143,4 +230,3 @@ class MaskParamDialog(QDialog):
             self._on_change(self.get_params(), key)
         except Exception:
             pass
-

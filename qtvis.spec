@@ -17,6 +17,7 @@ a = Analysis(
         ('icons/box_selection.svg', 'icons'),
         ('icons/cancel_box_selection.svg', 'icons'),
         ('icons/mask.svg', 'icons'),
+        ('icons/mask_mask.svg', 'icons'),
         ('icons/pause_pcd.png', 'icons'),
         ('icons/play_pcd.png', 'icons'),
         ('icons/pointsize.png', 'icons'),

@@ -27,6 +27,7 @@ python -m PyInstaller --onefile --windowed \
   --add-data "icons/box_selection.svg:icons" \
   --add-data "icons/cancel_box_selection.svg:icons" \
   --add-data "icons/mask.svg:icons" \
+  --add-data "icons/mask_mask.svg:icons" \
   --add-data "icons/pause_pcd.png:icons" \
   --add-data "icons/play_pcd.png:icons" \
   --add-data "icons/pointsize.png:icons" \

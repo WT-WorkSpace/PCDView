@@ -168,7 +168,8 @@ class PointCloudViewer(
         # Mask 绘制
         self._mask_items = []
         self._mask_visible = False
-        self._mask_toggle_action = None
+        if not hasattr(self, "_mask_toggle_action"):
+            self._mask_toggle_action = None
         self._mask_params = {
             "json_path": "",
             "point_size": 8.0,
@@ -179,8 +180,15 @@ class PointCloudViewer(
             "line_color": (0, 100, 0),
             "point_z": 0.0,
             "keep_inside_points": False,
+            "export_x_min": -40.0,
+            "export_x_max": 110.0,
+            "export_y_min": -70.0,
+            "export_y_max": 80.0,
+            "export_pixel": 15,
         }
-        self._mask_settings_action = None
+        if not hasattr(self, "_mask_settings_action"):
+            self._mask_settings_action = None
+        self._init_mask_draw_state()
         self._cluster_bbox_items = []
         self._cluster_bbox_infos = []
         self._selected_cluster_bbox_index = None
@@ -292,7 +300,7 @@ class PointCloudViewer(
         self.box_select_overlay.show()
         # Backspace 删除选中的目标框
         self.delete_shortcut = QShortcut(QKeySequence(Qt.Key_Backspace), self)
-        self.delete_shortcut.activated.connect(self._delete_selected_bbox)
+        self.delete_shortcut.activated.connect(self._handle_backspace_shortcut)
         self.rotate_yaw_shortcut = QShortcut(QKeySequence(Qt.Key_C), self)
         self.rotate_yaw_shortcut.activated.connect(self._rotate_selected_bbox_yaw_90)
         self.next_bbox_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
@@ -330,6 +338,17 @@ class PointCloudViewer(
         self.save_bboxes_btn.clicked.connect(self._save_bboxes_clicked)
         self.save_bboxes_btn.hide()
 
+        self.mask_edit_btn = QPushButton("绘制Mask", self.glwidget)
+        self.mask_edit_btn.setCheckable(True)
+        self.mask_edit_btn.setStyleSheet(
+            "QPushButton { background-color: #4B5563; color: white; padding: 6px 12px; "
+            "border-radius: 4px; font-weight: bold; } "
+            "QPushButton:hover { background-color: #374151; } "
+            "QPushButton:checked { background-color: #2196F3; }"
+        )
+        self.mask_edit_btn.clicked.connect(self._toggle_mask_draw_mode)
+        self.mask_edit_btn.hide()
+
         self.bbox_attr_panel = BboxAttributePanel(self.glwidget)
         self.bbox_attr_panel.attrSettingsRequested.connect(self._open_annotation_settings)
         self.bbox_attr_panel.hide()
@@ -354,6 +373,17 @@ class PointCloudViewer(
             self.copy_prev_bboxes_btn.show()
             self.copy_prev_bboxes_btn.raise_()
         self.save_bboxes_btn.raise_()
+        self._update_mask_edit_button_geometry()
+
+    def _update_mask_edit_button_geometry(self):
+        if not hasattr(self, "mask_edit_btn") or self.glwidget.width() <= 0:
+            return
+        m = 12
+        btn_w = max(self.mask_edit_btn.sizeHint().width(), 86)
+        btn_h = max(self.mask_edit_btn.sizeHint().height(), 30)
+        self.mask_edit_btn.setGeometry(m, m, btn_w, btn_h)
+        if self.mask_edit_btn.isVisible():
+            self.mask_edit_btn.raise_()
 
     def _update_bbox_attr_panel_geometry(self):
         if not hasattr(self, "bbox_attr_panel") or self.glwidget.width() <= 0 or self.glwidget.height() <= 0:
@@ -432,6 +462,13 @@ class PointCloudViewer(
         self._add_plane_action.setCheckable(True)
         self.toolbar.addAction(self._add_plane_action)
 
+        self._mask_edit_action = self.create_action(
+            "地图绘制模式",
+            "icons/mask_mask.svg",
+            self._toggle_mask_edit_mode,
+        )
+        self._mask_edit_action.setCheckable(True)
+        self.toolbar.addAction(self._mask_edit_action)
         self._mask_toggle_action = self.create_action(
             "显示/关闭Mask",
             "icons/mask.svg",
@@ -491,6 +528,10 @@ class PointCloudViewer(
         self._mask_settings_action = self.create_action(
             "Mask设置", "icons/mask.svg", self._open_mask_settings
         )
+        self._mask_edit_menu_action = self.create_action(
+            "地图绘制模式", "icons/mask_mask.svg", self._toggle_mask_edit_mode
+        )
+        self._mask_edit_menu_action.setCheckable(True)
         self._cluster_params_action = self.create_action(
             "当前帧点云聚类", "icons/cluster.svg", self._open_cluster_dialog
         )
@@ -712,6 +753,11 @@ class PointCloudViewer(
         dlg = HelpDialog(self)
         dlg.exec_()
 
+    def _handle_backspace_shortcut(self):
+        if self._delete_last_mask_draw_vertex():
+            return
+        self._delete_selected_bbox()
+
     def eventFilter(self, obj, event):
         """鼠标在 3D 视图上：框选模式拖拽生成框；否则左键点击显示三视图，右键显示目标框信息"""
         if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Shift and not event.isAutoRepeat():
@@ -720,6 +766,8 @@ class PointCloudViewer(
         elif event.type() == QEvent.KeyRelease and event.key() == Qt.Key_Shift and not event.isAutoRepeat():
             self.history_shift_down = False
             self._hide_history_frames()
+        if self._handle_mask_draw_key_event(event):
+            return True
         if self._handle_frame_key_event(event):
             return True
         if obj != self.glwidget:
@@ -728,10 +776,24 @@ class PointCloudViewer(
             self.box_select_overlay.setGeometry(0, 0, self.glwidget.width(), self.glwidget.height())
             self._update_save_button_geometry()
             self._update_bbox_attr_panel_geometry()
+            self._update_mask_edit_button_geometry()
+        mask_interaction_mode = bool(getattr(self, "_mask_draw_mode", False)) or bool(getattr(self, "_mask_edit_mode", False))
+        if event.type() == QEvent.Wheel and mask_interaction_mode:
+            ratio = self.glwidget.devicePixelRatioF()
+            if ratio <= 0:
+                ratio = 1.0
+            mx = event.pos().x() * ratio
+            my = event.pos().y() * ratio
+            return self._handle_mask_draw_mouse_event(event, mx, my)
 
         # 只有鼠标相关事件才有 pos()/button() 等信息；否则（例如 QPaintEvent/QHideEvent）
         # 会导致 event.pos() AttributeError。
-        mouse_types = {QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseMove}
+        mouse_types = {
+            QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease,
+            QEvent.MouseButtonDblClick,
+            QEvent.MouseMove,
+        }
         if event.type() not in mouse_types:
             return super().eventFilter(obj, event)
         if not hasattr(event, "pos"):
@@ -742,6 +804,9 @@ class PointCloudViewer(
             ratio = 1.0
         mx = event.pos().x() * ratio
         my = event.pos().y() * ratio
+
+        if mask_interaction_mode:
+            return self._handle_mask_draw_mouse_event(event, mx, my)
 
         if (self.history_shift_down and self.history_display_mode == "browse" and
                 event.type() == QEvent.MouseButtonPress):
@@ -2218,6 +2283,9 @@ class PointCloudViewer(
         keep_inside_mask = self._mask_keep_inside_points(self.points)
         if len(keep_inside_mask) == len(self.points):
             self.points = self.points[keep_inside_mask]
+        if bool(getattr(self, "_mask_draw_flatten_display", False)) and len(self.points) > 0:
+            self.points = np.asarray(self.points, dtype=np.float32).copy()
+            self.points[:, 2] = 0.0
 
         structured_for_display = getattr(self, "structured_points", None)
         if structured_for_display is not None and len(keep_inside_mask) == len(structured_for_display):
