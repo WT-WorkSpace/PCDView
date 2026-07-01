@@ -1,4 +1,5 @@
 from PyQt5.QtGui import QColor
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -30,6 +31,7 @@ class PlaneParamDialog(QDialog):
         alpha_default=120,
     ):
         super().__init__(parent)
+        self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle("修改平面参数")
 
         layout = QFormLayout(self)
@@ -159,4 +161,3 @@ class PlaneParamDialog(QDialog):
             "color_rgb": (int(self._color.red()), int(self._color.green()), int(self._color.blue())),
             "alpha": float(self.alpha_spin.value()),
         }
-

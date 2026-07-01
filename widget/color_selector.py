@@ -1,11 +1,13 @@
 from PyQt5.QtWidgets import (QLabel, QWidget, QPushButton, QDialog, QVBoxLayout, QHBoxLayout, QComboBox, QColorDialog)
 
 from PyQt5.QtGui import QColor
+from PyQt5.QtCore import Qt
 
 
 class ColorSelectorDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle("Select Color")
         self.color = QColor(255, 255, 255)
 

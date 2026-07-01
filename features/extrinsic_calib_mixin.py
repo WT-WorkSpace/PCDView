@@ -707,7 +707,7 @@ class ExtrinsicCalibMixin:
         if self._extrinsic_snapshot is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存偏移", "extrinsic_offsets.json", "JSON (*.json)"
+            None, "保存偏移", "extrinsic_offsets.json", "JSON (*.json)"
         )
         if not path:
             return
@@ -727,7 +727,7 @@ class ExtrinsicCalibMixin:
         if not source_pcd or not os.path.isfile(source_pcd):
             QMessageBox.warning(self, "保存失败", "无法定位当前帧原始 PCD 路径")
             return
-        path, _ = QFileDialog.getSaveFileName(self, "保存校正 PCD", "", "PCD (*.pcd)")
+        path, _ = QFileDialog.getSaveFileName(None, "保存校正 PCD", "", "PCD (*.pcd)")
         if not path:
             return
         try:
@@ -751,10 +751,10 @@ class ExtrinsicCalibMixin:
     def _extrinsic_batch_folder(self):
         if self._extrinsic_snapshot is None:
             return
-        in_dir = QFileDialog.getExistingDirectory(self, "输入 PCD 目录")
+        in_dir = QFileDialog.getExistingDirectory(None, "输入 PCD 目录")
         if not in_dir:
             return
-        out_dir = QFileDialog.getExistingDirectory(self, "输出目录")
+        out_dir = QFileDialog.getExistingDirectory(None, "输出目录")
         if not out_dir:
             return
         files = sorted(Path(in_dir).rglob("*.pcd"))

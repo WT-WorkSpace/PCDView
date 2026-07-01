@@ -446,7 +446,7 @@ class MaskMixin:
         start_dir = os.path.dirname(os.path.abspath(json_path))
         default_name = os.path.splitext(os.path.basename(json_path))[0] + "_tanway.txt"
         save_path, _ = QFileDialog.getSaveFileName(
-            self,
+            None,
             "导出tanway_txt",
             os.path.join(start_dir, default_name),
             "Text Files (*.txt)",
@@ -479,7 +479,7 @@ class MaskMixin:
         start_dir = os.path.dirname(os.path.abspath(json_path))
         default_name = os.path.splitext(os.path.basename(json_path))[0] + "_mask.npy"
         save_path, _ = QFileDialog.getSaveFileName(
-            self,
+            None,
             "导出npy",
             os.path.join(start_dir, default_name),
             "NumPy Files (*.npy)",
@@ -987,7 +987,7 @@ class MaskMixin:
         start_dir = ""
         if getattr(self, "pcd_file", None):
             start_dir = os.path.dirname(os.path.abspath(self.pcd_file))
-        path, _ = QFileDialog.getSaveFileName(self, "保存Mask JSON", start_dir, "JSON Files (*.json)")
+        path, _ = QFileDialog.getSaveFileName(None, "保存Mask JSON", start_dir, "JSON Files (*.json)")
         if not path:
             return ""
         if not path.lower().endswith(".json"):

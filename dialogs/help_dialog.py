@@ -1,3 +1,4 @@
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QTextBrowser, QVBoxLayout
 
 
@@ -77,6 +78,7 @@ HELP_MANUAL_HTML = """
 class HelpDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle("Point Cloud Viewer 功能说明")
         self.resize(760, 620)
 

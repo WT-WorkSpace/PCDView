@@ -750,7 +750,8 @@ class PointCloudViewer(
         return action
 
     def show_help_manual(self):
-        dlg = HelpDialog(self)
+        dlg = HelpDialog(None)
+        dlg.setWindowModality(Qt.ApplicationModal)
         dlg.exec_()
 
     def _handle_backspace_shortcut(self):
@@ -760,6 +761,10 @@ class PointCloudViewer(
 
     def eventFilter(self, obj, event):
         """鼠标在 3D 视图上：框选模式拖拽生成框；否则左键点击显示三视图，右键显示目标框信息"""
+        if obj is not self and isinstance(obj, QWidget):
+            window = obj.window()
+            if window is not self and isinstance(window, QDialog):
+                return super().eventFilter(obj, event)
         if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Shift and not event.isAutoRepeat():
             self.history_shift_down = True
             self._refresh_history_frame_visibility()
@@ -1326,7 +1331,7 @@ class PointCloudViewer(
         if not getattr(self, "pcd_file", None):
             QMessageBox.warning(self, "保存失败", "当前没有点云文件，无法生成目标框文件名")
             return False
-        directory = QFileDialog.getExistingDirectory(self, "选择目标框保存地址")
+        directory = QFileDialog.getExistingDirectory(None, "选择目标框保存地址")
         if not directory:
             return False
         self.bboxes_directory = directory
@@ -1338,7 +1343,7 @@ class PointCloudViewer(
     def _ensure_bboxes_directory(self):
         if getattr(self, "bboxes_directory", None):
             return True
-        directory = QFileDialog.getExistingDirectory(self, "选择目标框保存地址")
+        directory = QFileDialog.getExistingDirectory(None, "选择目标框保存地址")
         if not directory:
             return False
         self.bboxes_directory = directory
@@ -1594,7 +1599,7 @@ class PointCloudViewer(
         self.playing = False
         self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
 
-        self.directory = QFileDialog.getExistingDirectory(self, "Select Point Cloud Directory")
+        self.directory = QFileDialog.getExistingDirectory(None, "Select Point Cloud Directory")
         if self.directory:
             self._clear_session_extrinsic_offsets()
             self.point_cloud_files = natsorted([
@@ -1623,7 +1628,7 @@ class PointCloudViewer(
         self.playing = False
         self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
 
-        self.bboxes_directory = QFileDialog.getExistingDirectory(self, "Select bboxes json Directory")
+        self.bboxes_directory = QFileDialog.getExistingDirectory(None, "Select bboxes json Directory")
 
         if self.bboxes_directory:
             self.bboxes_files = natsorted([f for f in os.listdir(self.bboxes_directory) if f.endswith('.json')])
@@ -1633,7 +1638,7 @@ class PointCloudViewer(
             self.load_frame()
 
     def open_history_frames_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, "选择历史帧目录", self._default_history_frames_directory())
+        directory = QFileDialog.getExistingDirectory(None, "选择历史帧目录", self._default_history_frames_directory())
         if not directory:
             return
         self.history_frames_directory = directory
@@ -1845,7 +1850,7 @@ class PointCloudViewer(
         self.timer.stop()
         self.playing = False
         self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
-        self.pcd_file, _ = QFileDialog.getOpenFileName(self, "Open File", "", "Pcd Files (*.pcd)", options=QFileDialog.Options())
+        self.pcd_file, _ = QFileDialog.getOpenFileName(None, "Open File", "", "Pcd Files (*.pcd)", options=QFileDialog.Options())
         self.colors = QColor(0, 0, 255).getRgbF()
         self._user_solid_rgbf = self.colors
         if self.pcd_file:
@@ -2077,7 +2082,7 @@ class PointCloudViewer(
             "elevation": view_data_["elevation"],
             "azimuth": view_data_["azimuth"],
         }
-        file_name, _ = QFileDialog.getSaveFileName(self, "Save View", "", "JSON Files (*.json)")
+        file_name, _ = QFileDialog.getSaveFileName(None, "Save View", "", "JSON Files (*.json)")
         if file_name:
             with open(file_name, 'w') as f:
                 json.dump(view_data, f, indent=4)
@@ -2085,7 +2090,7 @@ class PointCloudViewer(
 
     def load_view(self):
         """加载保存的视角参数"""
-        file_name, _ = QFileDialog.getOpenFileName(self, "Open View", "", "JSON Files (*.json)")
+        file_name, _ = QFileDialog.getOpenFileName(None, "Open View", "", "JSON Files (*.json)")
         if file_name:
             with open(file_name, 'r') as f:
                 view_data = json.load(f)
@@ -2385,7 +2390,9 @@ class PointCloudViewer(
             QMessageBox.information(self, "点云聚类", "当前没有可聚类的点云。")
             return
 
-        dlg = QDialog(self)
+        dlg = QDialog(None)
+        dlg.setWindowFlag(Qt.Window, True)
+        dlg.setWindowModality(Qt.ApplicationModal)
         dlg.setWindowTitle("当前帧点云聚类参数")
         dlg.setMinimumWidth(520)
         form = QFormLayout(dlg)

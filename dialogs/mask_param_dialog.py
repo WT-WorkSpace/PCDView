@@ -2,6 +2,7 @@ import json
 import os
 
 from PyQt5.QtGui import QColor
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QColorDialog,
     QCheckBox,
@@ -21,6 +22,7 @@ from PyQt5.QtWidgets import (
 class MaskParamDialog(QDialog):
     def __init__(self, parent=None, params=None, on_change=None):
         super().__init__(parent)
+        self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle("Mask设置")
         self._params = params or {}
         self._on_change = on_change
@@ -137,7 +139,7 @@ class MaskParamDialog(QDialog):
         )
 
     def _pick_json_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择Mask JSON文件", "", "JSON Files (*.json)")
+        path, _ = QFileDialog.getOpenFileName(None, "选择Mask JSON文件", "", "JSON Files (*.json)")
         if path:
             self.json_path_edit.setText(path)
             self._update_json_info()
