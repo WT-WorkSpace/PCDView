@@ -126,7 +126,7 @@ class PointCloudViewer(
         self.current_bbox_items = []
         self.current_bbox_infos = []  # 每个框的详细信息，用于点击弹窗
         self.bbox_attr_defs = self._load_bbox_attr_defs()
-        self.auto_create_empty_bbox_json = self._load_auto_create_empty_bbox_json()
+        self.auto_create_empty_bbox_json = False
         self.current_link_arrows = []  # Semitrailer 指向 link_id 目标的弧线箭头
         self.selected_bbox_index = None  # 当前选中的框索引，用于实体框高亮
         self.box_select_mode = False  # 框选模式：拖拽生成新矩形框
@@ -541,7 +541,7 @@ class PointCloudViewer(
         )
         self._extrinsic_calib_menu_action.setCheckable(True)
         self._bbox_attr_settings_action = self.create_action(
-            "自定义标注属性", "icons/add_bbox.svg", self._open_annotation_settings
+            "标注设置", "icons/add_bbox.svg", self._open_annotation_settings
         )
         self.save_view_action = self.create_action("Save View", 'icons/save_view.svg', self.save_view)
         self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
@@ -569,11 +569,11 @@ class PointCloudViewer(
     def _default_bbox_attr_defs(self):
         class_options = list(self.class_map.keys()) if hasattr(self, "class_map") else ["others"]
         return [
-            {"key": "class_name", "name": "类别", "label": "类别", "type": "select", "options": class_options, "system": True, "allow_empty": False, "default": "others"},
-            {"key": "id", "name": "ID", "label": "ID", "type": "text", "options": [], "system": True, "allow_empty": True},
-            {"key": "link_id", "name": "关联 ID", "label": "关联 ID", "type": "text", "options": [], "system": True, "allow_empty": True},
-            {"key": "confidence", "name": "置信度", "label": "置信度", "type": "check", "options": ["0", "1", "2", "3"], "system": True, "multi": False, "allow_empty": True},
-            {"key": "movement_state", "name": "运动状态", "label": "运动状态", "type": "check", "options": ["0", "1"], "system": True, "multi": False, "allow_empty": True},
+            {"key": "type", "field_key": "class_name", "name": "类别", "label": "类别", "type": "select", "options": class_options, "system": True, "allow_empty": False, "default": "others"},
+            {"key": "ID", "field_key": "id", "name": "ID", "label": "ID", "type": "text", "options": [], "system": True, "allow_empty": True},
+            {"key": "tag.link_id", "field_key": "link_id", "name": "关联 ID", "label": "关联 ID", "type": "text", "options": [], "system": True, "allow_empty": True},
+            {"key": "tag.confidence", "field_key": "confidence", "name": "置信度", "label": "置信度", "type": "check", "options": ["0", "1", "2", "3"], "system": True, "multi": False, "allow_empty": True},
+            {"key": "tag.movement_state", "field_key": "movement_state", "name": "运动状态", "label": "运动状态", "type": "check", "options": ["0", "1"], "system": True, "multi": False, "allow_empty": True},
         ]
 
     def _load_bbox_attr_defs(self):
@@ -590,28 +590,39 @@ class PointCloudViewer(
         if not isinstance(attr_defs, list):
             return defaults
         cleaned = []
-        default_by_key = {item["key"]: item for item in defaults}
+        default_by_field_key = {item.get("field_key", item["key"]): item for item in defaults}
+        default_by_json_key = {item["key"]: item for item in defaults}
         for item in attr_defs:
             if not isinstance(item, dict):
                 continue
-            key = str(item.get("key") or item.get("name") or "").strip()
-            name = str(item.get("name") or item.get("label") or key).strip()
+            raw_key = str(item.get("key") or item.get("name") or "").strip()
+            raw_field_key = str(item.get("field_key") or raw_key).strip()
+            default_item = default_by_field_key.get(raw_field_key) or default_by_json_key.get(raw_key)
+            key = str(default_item.get("key") if default_item else raw_key).strip()
+            field_key = str(default_item.get("field_key", default_item.get("key")) if default_item else raw_field_key).strip()
+            if not default_item and key.startswith("tag.") and "." in key and "field_key" not in item:
+                field_key = key.split(".", 1)[1].strip()
+            name = str(item.get("name") or item.get("label") or (default_item.get("name") if default_item else key)).strip()
             attr_type = item.get("type") if item.get("type") in ("select", "check", "text") else "text"
             options = [str(v).strip() for v in (item.get("options") or []) if str(v).strip()]
-            if key and name:
+            if key and field_key and name:
                 cleaned_item = {"key": key, "name": name, "label": name, "type": attr_type, "options": options}
-                if key in default_by_key or item.get("system"):
+                if field_key != key:
+                    cleaned_item["field_key"] = field_key
+                if default_item or item.get("system"):
                     cleaned_item["system"] = True
-                if not options and key in default_by_key:
-                    cleaned_item["options"] = list(default_by_key[key].get("options") or [])
-                cleaned_item["allow_empty"] = bool(item.get("allow_empty", default_by_key.get(key, {}).get("allow_empty", True)))
+                if not options and default_item:
+                    cleaned_item["options"] = list(default_item.get("options") or [])
+                cleaned_item["allow_empty"] = bool(item.get("allow_empty", default_item.get("allow_empty", True) if default_item else True))
                 if "default" in item:
                     cleaned_item["default"] = item.get("default")
-                if attr_type == "check" and (item.get("multi") is False or default_by_key.get(key, {}).get("multi") is False):
+                elif default_item and "default" in default_item:
+                    cleaned_item["default"] = default_item.get("default")
+                if attr_type == "check" and (item.get("multi") is False or (default_item and default_item.get("multi") is False)):
                     cleaned_item["multi"] = False
                 cleaned.append(cleaned_item)
-        existing = {item["key"] for item in cleaned}
-        missing_defaults = [item for item in defaults if item["key"] not in existing]
+        existing = {item.get("field_key", item["key"]) for item in cleaned}
+        missing_defaults = [item for item in defaults if item.get("field_key", item["key"]) not in existing]
         return missing_defaults + cleaned
 
     def _load_auto_create_empty_bbox_json(self):
@@ -667,6 +678,8 @@ class PointCloudViewer(
         self._set_history_display_mode(dialog.history_browse_enabled())
 
     def _parse_bbox_attr_default(self, attr_def):
+        field_key = attr_def.get("field_key", attr_def.get("key"))
+
         def _first_default_value(raw):
             if isinstance(raw, (list, tuple, set)):
                 for item in raw:
@@ -685,11 +698,11 @@ class PointCloudViewer(
             return raw
 
         if "default" not in attr_def:
-            if attr_def.get("key") == "class_name":
+            if field_key == "class_name":
                 return "others"
             if not attr_def.get("allow_empty", True) and attr_def.get("options"):
                 value = attr_def["options"][0]
-                if attr_def.get("key") in ("confidence", "movement_state"):
+                if field_key in ("confidence", "movement_state"):
                     try:
                         return int(value)
                     except (TypeError, ValueError):
@@ -699,9 +712,8 @@ class PointCloudViewer(
         value = attr_def.get("default")
         if value in ("", None):
             return None
-        key = attr_def.get("key")
         attr_type = attr_def.get("type")
-        if key in ("confidence", "movement_state"):
+        if field_key in ("confidence", "movement_state"):
             value = _first_default_value(value)
             if value is None:
                 return None
@@ -709,11 +721,11 @@ class PointCloudViewer(
                 return int(value)
             except (TypeError, ValueError):
                 return None
-        if key in ("id", "link_id"):
+        if field_key in ("id", "link_id"):
             text = str(value).strip()
             if not text:
                 return None
-            if key == "link_id":
+            if field_key == "link_id":
                 vals = []
                 for part in text.replace(";", ",").split(","):
                     part = part.strip()
@@ -735,7 +747,7 @@ class PointCloudViewer(
     def _default_bbox_attr_values(self):
         values = {}
         for attr_def in self.bbox_attr_defs:
-            key = attr_def.get("key") or attr_def.get("name")
+            key = attr_def.get("field_key") or attr_def.get("key") or attr_def.get("name")
             if key:
                 values[key] = self._parse_bbox_attr_default(attr_def)
         values["class_name"] = values.get("class_name") or "others"
@@ -781,7 +793,7 @@ class PointCloudViewer(
             "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
             "class_name", "id", "link_id", "confidence", "movement_state",
         }
-        keep.update(attr_def.get("key") or attr_def.get("name") for attr_def in self.bbox_attr_defs)
+        keep.update(attr_def.get("field_key") or attr_def.get("key") or attr_def.get("name") for attr_def in self.bbox_attr_defs)
         keep.discard(None)
         for info in self.current_bbox_infos:
             for key in list(info.keys()):

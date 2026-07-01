@@ -137,10 +137,13 @@ def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
         tag = {}
         confidence = info.get("confidence")
         movement_state = info.get("movement_state")
+        link_id = info.get("link_id")
         if confidence is not None:
             tag["confidence"] = str(confidence)
         if movement_state is not None:
             tag["movement_state"] = str(movement_state)
+        if link_id is not None:
+            tag["link_id"] = link_id
 
         reserved_keys = {
             "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
@@ -151,7 +154,12 @@ def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
             if key in reserved_keys:
                 continue
             if value is not None:
-                tag[key] = value
+                if isinstance(key, str) and key.startswith("tag.") and "." in key:
+                    tag_key = key.split(".", 1)[1].strip()
+                    if tag_key:
+                        tag[tag_key] = value
+                else:
+                    tag[key] = value
         if tag:
             agent["tag"] = tag
 

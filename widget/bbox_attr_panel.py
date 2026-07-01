@@ -197,18 +197,19 @@ class BboxAttributePanel(QWidget):
 
         row = 0
         for attr_def in self._attr_defs:
-            key = str(attr_def.get("key") or attr_def.get("name") or "").strip()
-            label_text = str(attr_def.get("label") or attr_def.get("name") or key).strip()
-            if not key or not label_text:
+            field_key = str(attr_def.get("field_key") or attr_def.get("key") or attr_def.get("name") or "").strip()
+            json_key = str(attr_def.get("key") or field_key).strip()
+            label_text = str(attr_def.get("label") or attr_def.get("name") or json_key).strip()
+            if not field_key or not label_text:
                 continue
             attr_type = attr_def.get("type") or "text"
             options = [str(v) for v in (attr_def.get("options") or []) if str(v).strip()]
             label = self._field_label(label_text)
-            widget, control = self._make_custom_control(key, attr_type, options, attr_def)
+            widget, control = self._make_custom_control(field_key, attr_type, options, attr_def)
             self.form_layout.addWidget(label, row, 0)
             self.form_layout.addWidget(widget, row, 1)
             self._custom_rows.append((label, widget))
-            self._custom_controls[key] = control
+            self._custom_controls[field_key] = control
             row += 1
         self.form_layout.invalidate()
         self.updateGeometry()
