@@ -339,7 +339,8 @@ class MaskMixin:
             # 若 keep_inside_points 未开启，则 style/point_size/颜色改动只重建 mask，不刷新点云
             # 以实现“对主界面联动拆分”的效果。
 
-        dlg = MaskParamDialog(self, self._mask_params, on_change=_on_change_live)
+        dlg = MaskParamDialog(None, self._mask_params, on_change=_on_change_live, owner=self)
+        dlg.setWindowModality(Qt.ApplicationModal)
         if dlg.exec_() != 1:  # QDialog.Accepted
             return
         self._mask_params = dlg.get_params()
@@ -378,7 +379,7 @@ class MaskMixin:
         x_max = float(params.get("export_x_max", 110.0))
         y_min = float(params.get("export_y_min", -70.0))
         y_max = float(params.get("export_y_max", 80.0))
-        pixel = int(params.get("export_pixel", 15))
+        pixel = int(params.get("export_pixel", 10))
         if x_max <= x_min or y_max <= y_min:
             raise ValueError("导出范围无效：最大值必须大于最小值。")
         if pixel <= 0:

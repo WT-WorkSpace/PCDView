@@ -1,10 +1,8 @@
 import json
 import os
 
-from PyQt5.QtGui import QColor
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QColorDialog,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -20,12 +18,13 @@ from PyQt5.QtWidgets import (
 
 
 class MaskParamDialog(QDialog):
-    def __init__(self, parent=None, params=None, on_change=None):
+    def __init__(self, parent=None, params=None, on_change=None, owner=None):
         super().__init__(parent)
         self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle("Mask设置")
         self._params = params or {}
         self._on_change = on_change
+        self._owner = owner if owner is not None else parent
 
         layout = QFormLayout(self)
 
@@ -60,19 +59,6 @@ class MaskParamDialog(QDialog):
         self.z_value_spin.setValue(float(self._params.get("point_z", 0.0)))
         self.z_value_spin.valueChanged.connect(lambda *_: self._emit_change("point_z"))
         layout.addRow("JSON点Z值", self.z_value_spin)
-
-        self._point_color = QColor(*self._params.get("point_color", (255, 90, 90)))
-        self._line_color = QColor(*self._params.get("line_color", (255, 255, 0)))
-
-        self.point_color_btn = QPushButton("选择点颜色")
-        self.point_color_btn.clicked.connect(self._pick_point_color)
-        self._update_btn_color(self.point_color_btn, self._point_color)
-        layout.addRow("点颜色", self.point_color_btn)
-
-        self.line_color_btn = QPushButton("选择线颜色")
-        self.line_color_btn.clicked.connect(self._pick_line_color)
-        self._update_btn_color(self.line_color_btn, self._line_color)
-        layout.addRow("线颜色", self.line_color_btn)
 
         self.keep_inside_checkbox = QCheckBox("仅保留圈内点")
         self.keep_inside_checkbox.setChecked(bool(self._params.get("keep_inside_points", False)))
@@ -109,7 +95,7 @@ class MaskParamDialog(QDialog):
 
         self.export_pixel_spin = QSpinBox(self)
         self.export_pixel_spin.setRange(1, 1000)
-        self.export_pixel_spin.setValue(int(self._params.get("export_pixel", 15)))
+        self.export_pixel_spin.setValue(int(self._params.get("export_pixel", 10)))
         layout.addRow("导出像素(份/m)", self.export_pixel_spin)
 
         self.export_tanway_btn = QPushButton("导出tanway_txt")
@@ -132,12 +118,6 @@ class MaskParamDialog(QDialog):
         self.btn_box.rejected.connect(self.reject)
         layout.addRow(self.btn_box)
 
-    def _update_btn_color(self, btn, color):
-        btn.setStyleSheet(
-            "QPushButton { background-color: rgb(%d,%d,%d); }"
-            % (color.red(), color.green(), color.blue())
-        )
-
     def _pick_json_file(self):
         path, _ = QFileDialog.getOpenFileName(None, "选择Mask JSON文件", "", "JSON Files (*.json)")
         if path:
@@ -145,20 +125,6 @@ class MaskParamDialog(QDialog):
             self._update_json_info()
             self._apply_export_defaults_from_json(force=True)
             self._emit_change("json_path")
-
-    def _pick_point_color(self):
-        c = QColorDialog.getColor(self._point_color, self, "选择点颜色")
-        if c.isValid():
-            self._point_color = c
-            self._update_btn_color(self.point_color_btn, c)
-            self._emit_change("point_color")
-
-    def _pick_line_color(self):
-        c = QColorDialog.getColor(self._line_color, self, "选择线颜色")
-        if c.isValid():
-            self._line_color = c
-            self._update_btn_color(self.line_color_btn, c)
-            self._emit_change("line_color")
 
     def _update_json_info(self):
         path = self.json_path_edit.text().strip()
@@ -196,18 +162,18 @@ class MaskParamDialog(QDialog):
             self.export_pixel_spin.setValue(max(1, int(float(img_resolution))))
 
     def _export_tanway_txt(self):
-        parent = self.parent()
-        if parent is None or not hasattr(parent, "_export_mask_tanway_txt"):
+        owner = self._owner
+        if owner is None or not hasattr(owner, "_export_mask_tanway_txt"):
             QMessageBox.warning(self, "导出tanway_txt", "当前窗口不支持导出。")
             return
-        parent._export_mask_tanway_txt(self.get_params())
+        owner._export_mask_tanway_txt(self.get_params())
 
     def _export_npy(self):
-        parent = self.parent()
-        if parent is None or not hasattr(parent, "_export_mask_npy"):
+        owner = self._owner
+        if owner is None or not hasattr(owner, "_export_mask_npy"):
             QMessageBox.warning(self, "导出npy", "当前窗口不支持导出。")
             return
-        parent._export_mask_npy(self.get_params())
+        owner._export_mask_npy(self.get_params())
 
     def get_params(self):
         return {
@@ -215,8 +181,6 @@ class MaskParamDialog(QDialog):
             "point_size": float(self.point_size_spin.value()),
             "line_width": float(self.line_width_spin.value()),
             "point_z": float(self.z_value_spin.value()),
-            "point_color": (self._point_color.red(), self._point_color.green(), self._point_color.blue()),
-            "line_color": (self._line_color.red(), self._line_color.green(), self._line_color.blue()),
             "keep_inside_points": bool(self.keep_inside_checkbox.isChecked()),
             "export_x_min": float(self.export_x_min_spin.value()),
             "export_x_max": float(self.export_x_max_spin.value()),

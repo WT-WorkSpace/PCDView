@@ -184,7 +184,7 @@ class PointCloudViewer(
             "export_x_max": 110.0,
             "export_y_min": -70.0,
             "export_y_max": 80.0,
-            "export_pixel": 15,
+            "export_pixel": 10,
         }
         if not hasattr(self, "_mask_settings_action"):
             self._mask_settings_action = None
