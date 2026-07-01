@@ -255,7 +255,14 @@ class BboxAttributePanel(QWidget):
             layout.addStretch()
             if group is not None:
                 group.buttonClicked.connect(self._on_attr_changed)
-            return widget, {"type": attr_type, "widget": widget, "checks": checks, "multi": multi, "group": group}
+            return widget, {
+                "type": attr_type,
+                "widget": widget,
+                "checks": checks,
+                "multi": multi,
+                "group": group,
+                "default": attr_def.get("default"),
+            }
         edit = QLineEdit()
         if key == "link_id":
             placeholder = "多个 ID 用逗号分隔"
@@ -290,6 +297,13 @@ class BboxAttributePanel(QWidget):
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
             elif attr_type == "check":
+                if value is None and control.get("default") not in (None, ""):
+                    default_value = control.get("default")
+                    if isinstance(default_value, (list, tuple, set)):
+                        default_values = [v for v in default_value if v not in (None, "")]
+                        value = default_values[0] if (not control.get("multi", True) and default_values) else default_values
+                    else:
+                        value = str(default_value).strip() or None
                 if not control.get("multi", True):
                     target = "不写入" if value is None else str(value)
                     matched = False

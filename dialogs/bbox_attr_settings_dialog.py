@@ -32,7 +32,7 @@ RESERVED_ATTR_NAMES = {
 
 
 class BboxAttrSettingsDialog(QDialog):
-    def __init__(self, attr_defs=None, history_browse_enabled=False, parent=None):
+    def __init__(self, attr_defs=None, history_browse_enabled=False, auto_create_empty_json=False, parent=None):
         super().__init__(parent)
         self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle("自定义标注属性")
@@ -56,14 +56,21 @@ class BboxAttrSettingsDialog(QDialog):
         history_layout.addWidget(self.history_browse_radio)
         layout.addWidget(history_group)
 
+        save_group = QGroupBox("保存", self)
+        save_layout = QVBoxLayout(save_group)
+        self.auto_create_empty_json_check = QCheckBox("无标注框的帧也自动生成空 JSON 文件（[]）", save_group)
+        self.auto_create_empty_json_check.setChecked(bool(auto_create_empty_json))
+        save_layout.addWidget(self.auto_create_empty_json_check)
+        layout.addWidget(save_group)
+
         attr_group = QGroupBox("目标框属性", self)
         attr_layout = QVBoxLayout(attr_group)
-        tip = QLabel("每行一个属性。下拉/勾选类型的选项用逗号分隔；默认值为空表示不预填。")
+        tip = QLabel("每行一个属性。key 是保存到 JSON 的字段名；下拉/勾选类型的选项用逗号分隔；默认值为空表示不预填。")
         tip.setWordWrap(True)
         attr_layout.addWidget(tip)
 
-        self.table = QTableWidget(0, 5, self)
-        self.table.setHorizontalHeaderLabels(["属性名", "方式", "可不写入", "默认值", "选项"])
+        self.table = QTableWidget(0, 6, self)
+        self.table.setHorizontalHeaderLabels(["属性名", "key", "方式", "可不写入", "默认值", "选项"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked)
@@ -89,35 +96,40 @@ class BboxAttrSettingsDialog(QDialog):
             self._add_row(attr_def)
 
     def _add_empty_row(self):
-        self._add_row({"name": "", "type": "text", "options": []})
+        self._add_row({"key": "", "name": "", "type": "text", "options": []})
 
     def _add_row(self, attr_def):
         row = self.table.rowCount()
         self.table.insertRow(row)
+        key = str(attr_def.get("key") or attr_def.get("name") or "").strip()
         label = str(attr_def.get("label") or attr_def.get("name") or attr_def.get("key") or "")
         name_item = QTableWidgetItem(label)
-        name_item.setData(Qt.UserRole, attr_def.get("key") or "")
         name_item.setData(Qt.UserRole + 1, bool(attr_def.get("system", False)))
         name_item.setData(Qt.UserRole + 2, bool(attr_def.get("multi", True)))
         self.table.setItem(row, 0, name_item)
+
+        key_item = QTableWidgetItem(key)
+        if bool(attr_def.get("system", False)):
+            key_item.setFlags(key_item.flags() & ~Qt.ItemIsEditable)
+        self.table.setItem(row, 1, key_item)
 
         type_combo = QComboBox(self.table)
         type_combo.addItems([ATTR_TYPE_LABELS["text"], ATTR_TYPE_LABELS["select"], ATTR_TYPE_LABELS["check"]])
         type_key = attr_def.get("type") or "text"
         type_combo.setCurrentText(ATTR_TYPE_LABELS.get(type_key, ATTR_TYPE_LABELS["text"]))
-        self.table.setCellWidget(row, 1, type_combo)
+        self.table.setCellWidget(row, 2, type_combo)
 
         allow_empty = QCheckBox(self.table)
         allow_empty.setChecked(bool(attr_def.get("allow_empty", True)))
-        self.table.setCellWidget(row, 2, allow_empty)
+        self.table.setCellWidget(row, 3, allow_empty)
 
         default_value = attr_def.get("default", "")
         if isinstance(default_value, (list, tuple)):
             default_value = ",".join(str(v) for v in default_value)
-        self.table.setItem(row, 3, QTableWidgetItem("" if default_value is None else str(default_value)))
+        self.table.setItem(row, 4, QTableWidgetItem("" if default_value is None else str(default_value)))
 
         options = attr_def.get("options") or []
-        self.table.setItem(row, 4, QTableWidgetItem(",".join(str(v) for v in options)))
+        self.table.setItem(row, 5, QTableWidgetItem(",".join(str(v) for v in options)))
 
     def _remove_selected_rows(self):
         rows = sorted({index.row() for index in self.table.selectedIndexes()}, reverse=True)
@@ -132,24 +144,27 @@ class BboxAttrSettingsDialog(QDialog):
         seen = set()
         for row in range(self.table.rowCount()):
             name_item = self.table.item(row, 0)
-            default_item = self.table.item(row, 3)
-            options_item = self.table.item(row, 4)
+            key_item = self.table.item(row, 1)
+            default_item = self.table.item(row, 4)
+            options_item = self.table.item(row, 5)
             label = (name_item.text() if name_item else "").strip()
-            key = (name_item.data(Qt.UserRole) if name_item else "") or ""
+            key = (key_item.text() if key_item else "").strip()
             system = bool(name_item.data(Qt.UserRole + 1)) if name_item else False
             multi = bool(name_item.data(Qt.UserRole + 2)) if name_item else True
-            name = key or label
+            name = key
             if not label:
                 continue
+            if not name:
+                raise ValueError("{} 的 key 不能为空".format(label))
             if not system and name in RESERVED_ATTR_NAMES:
                 raise ValueError("{} 是系统字段，不能作为自定义属性名".format(name))
             if name in seen:
-                raise ValueError("属性名重复：{}".format(name))
+                raise ValueError("key 重复：{}".format(name))
             seen.add(name)
 
-            type_combo = self.table.cellWidget(row, 1)
+            type_combo = self.table.cellWidget(row, 2)
             type_key = ATTR_LABEL_TYPES.get(type_combo.currentText(), "text") if type_combo else "text"
-            allow_empty_widget = self.table.cellWidget(row, 2)
+            allow_empty_widget = self.table.cellWidget(row, 3)
             allow_empty = bool(allow_empty_widget.isChecked()) if allow_empty_widget else True
             default_text = (default_item.text() if default_item else "").strip()
             options_text = (options_item.text() if options_item else "").strip()
@@ -189,3 +204,6 @@ class BboxAttrSettingsDialog(QDialog):
 
     def history_browse_enabled(self):
         return bool(self.history_browse_radio.isChecked())
+
+    def auto_create_empty_json_enabled(self):
+        return bool(self.auto_create_empty_json_check.isChecked())

@@ -126,6 +126,7 @@ class PointCloudViewer(
         self.current_bbox_items = []
         self.current_bbox_infos = []  # 每个框的详细信息，用于点击弹窗
         self.bbox_attr_defs = self._load_bbox_attr_defs()
+        self.auto_create_empty_bbox_json = self._load_auto_create_empty_bbox_json()
         self.current_link_arrows = []  # Semitrailer 指向 link_id 目标的弧线箭头
         self.selected_bbox_index = None  # 当前选中的框索引，用于实体框高亮
         self.box_select_mode = False  # 框选模式：拖拽生成新矩形框
@@ -571,7 +572,7 @@ class PointCloudViewer(
             {"key": "class_name", "name": "类别", "label": "类别", "type": "select", "options": class_options, "system": True, "allow_empty": False, "default": "others"},
             {"key": "id", "name": "ID", "label": "ID", "type": "text", "options": [], "system": True, "allow_empty": True},
             {"key": "link_id", "name": "关联 ID", "label": "关联 ID", "type": "text", "options": [], "system": True, "allow_empty": True},
-            {"key": "confidence", "name": "置信度", "label": "置信度", "type": "check", "options": ["0", "1", "2"], "system": True, "multi": False, "allow_empty": True},
+            {"key": "confidence", "name": "置信度", "label": "置信度", "type": "check", "options": ["0", "1", "2", "3"], "system": True, "multi": False, "allow_empty": True},
             {"key": "movement_state", "name": "运动状态", "label": "运动状态", "type": "check", "options": ["0", "1"], "system": True, "multi": False, "allow_empty": True},
         ]
 
@@ -613,20 +614,44 @@ class PointCloudViewer(
         missing_defaults = [item for item in defaults if item["key"] not in existing]
         return missing_defaults + cleaned
 
+    def _load_auto_create_empty_bbox_json(self):
+        path = self._bbox_attr_config_path()
+        if not path.is_file():
+            return False
+        try:
+            with open(path, "r", encoding="UTF-8") as f:
+                data = json.load(f)
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("auto_create_empty_json", False))
+
     def _save_bbox_attr_defs(self):
         path = self._bbox_attr_config_path()
         with open(path, "w", encoding="UTF-8") as f:
-            json.dump({"attributes": self.bbox_attr_defs}, f, indent=2, ensure_ascii=False)
+            json.dump(
+                {
+                    "attributes": self.bbox_attr_defs,
+                    "auto_create_empty_json": bool(getattr(self, "auto_create_empty_bbox_json", False)),
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
     def _open_annotation_settings(self):
         dialog = BboxAttrSettingsDialog(
             self.bbox_attr_defs,
             self.history_display_mode == "browse",
-            self,
+            bool(getattr(self, "auto_create_empty_bbox_json", False)),
+            None,
         )
+        dialog.setWindowModality(Qt.ApplicationModal)
         if dialog.exec_() != QDialog.Accepted:
             return
         self.bbox_attr_defs = dialog.attr_defs()
+        self.auto_create_empty_bbox_json = dialog.auto_create_empty_json_enabled()
         try:
             self._save_bbox_attr_defs()
         except Exception as exc:
@@ -642,6 +667,23 @@ class PointCloudViewer(
         self._set_history_display_mode(dialog.history_browse_enabled())
 
     def _parse_bbox_attr_default(self, attr_def):
+        def _first_default_value(raw):
+            if isinstance(raw, (list, tuple, set)):
+                for item in raw:
+                    if item not in ("", None):
+                        return item
+                return None
+            text = str(raw).strip()
+            if not text:
+                return None
+            if "," in text or ";" in text:
+                for part in text.replace(";", ",").split(","):
+                    part = part.strip()
+                    if part:
+                        return part
+                return None
+            return raw
+
         if "default" not in attr_def:
             if attr_def.get("key") == "class_name":
                 return "others"
@@ -660,6 +702,9 @@ class PointCloudViewer(
         key = attr_def.get("key")
         attr_type = attr_def.get("type")
         if key in ("confidence", "movement_state"):
+            value = _first_default_value(value)
+            if value is None:
+                return None
             try:
                 return int(value)
             except (TypeError, ValueError):
@@ -1281,8 +1326,6 @@ class PointCloudViewer(
             "l": l, "w": w, "h": h,
             "yaw": yaw, "roll": 0.0, "pitch": 0.0,
             "class_name": class_name,
-            "confidence": None,
-            "movement_state": None,
         }
         info.update(default_attrs)
         self.current_bbox_infos.append(info)
@@ -1351,6 +1394,25 @@ class PointCloudViewer(
             self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem) + ".json")
             self.original_json_agents = load_json(self.json_path) if os.path.isfile(self.json_path) else None
         return True
+
+    def _ensure_empty_bbox_json_for_current_frame(self):
+        if not bool(getattr(self, "auto_create_empty_bbox_json", False)):
+            return False
+        if not getattr(self, "json_path", None):
+            return False
+        if os.path.isfile(self.json_path):
+            return False
+        try:
+            os.makedirs(os.path.dirname(self.json_path), exist_ok=True)
+            with open(self.json_path, "w", encoding="UTF-8") as f:
+                json.dump([], f, indent=2, ensure_ascii=False)
+                f.write("\n")
+            self.original_json_agents = []
+            self._set_status_message("已为空帧生成标注文件: {}".format(os.path.basename(self.json_path)))
+            return True
+        except Exception as exc:
+            self._set_status_message("空标注文件生成失败: {}".format(exc))
+            return False
 
     def _bbox_infos_from_agents(self, agents):
         json_data = get_anno_from_tanway_json(agents)
@@ -2152,6 +2214,7 @@ class PointCloudViewer(
         if not preserve_current_bboxes and self.bboxes_directory is not None:
             self.json_path = os.path.join(str(self.bboxes_directory), str(Path(self.pcd_file).stem)+".json")
             self.original_json_agents = None
+            self._ensure_empty_bbox_json_for_current_frame()
             if os.path.isfile(self.json_path):
                 self.original_json_agents = load_json(self.json_path)
                 json_data = get_anno_from_tanway_json(self.original_json_agents)

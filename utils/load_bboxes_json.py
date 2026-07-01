@@ -104,12 +104,11 @@ def get_anno_from_tanway_json(json_data):
 def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
     """
     将 bbox_infos 保存为 Tanway JSON 格式。
-    bbox_infos: list of dict, 每个含 x,y,z,l,w,h,yaw, class_name, 及可选的 id, link_id, pitch, roll,
-    confidence, movement_state 等。
-    original_agents: 原始 JSON 的 agent 列表，用于保留额外字段；若为 None 则仅用 bbox_infos 生成。
+    bbox_infos: list of dict, 每个含 x,y,z,l,w,h,yaw,class_name，及可选 pitch/confidence/movement_state。
+    输出结构对齐 Tanway 简化格式：type/position3d/size3d/heading/pitch/tag。
     """
     agents_out = []
-    for i, info in enumerate(bbox_infos):
+    for info in bbox_infos:
         x = float(info.get("x", 0))
         y = float(info.get("y", 0))
         z = float(info.get("z", 0))
@@ -118,74 +117,43 @@ def save_bboxes_to_tanway_json(json_path, bbox_infos, original_agents=None):
         h = float(info.get("h", 1))
         yaw = float(info.get("yaw", 0))
         pitch = float(info.get("pitch", 0))
-        roll = float(info.get("roll", 0))
         class_name = info.get("class_name", "others")
         if "TYPE_" not in class_name and class_name != "others":
             type_str = "TYPE_" + class_name
         else:
             type_str = class_name
 
-        if original_agents is not None and i < len(original_agents):
-            agent = dict(original_agents[i])
-        else:
-            agent = {
-                "position3d": {"x": 0, "y": 0, "z": 0},
-                "size3d": {"x": 1, "y": 1, "z": 1},
-                "heading": 0,
-                "type": "others",
-                "pitch": 0,
-                "roll": 0,
-                "ID": None,
-                "tag": {"link_id": None, "confidence": None, "movement_state": None},
-            }
-
-        agent["position3d"] = {"x": x, "y": y, "z": z}
-        agent["size3d"] = {"x": l, "y": w, "z": h}
-        agent["heading"] = yaw
-        agent["type"] = type_str
-        agent["pitch"] = pitch
-        if "roll" in agent or roll != 0:
-            agent["roll"] = roll
-
+        agent = {
+            "type": type_str,
+            "position3d": {"x": x, "y": y, "z": z},
+            "size3d": {"x": l, "y": w, "z": h},
+            "heading": yaw,
+            "pitch": pitch,
+        }
         bid = info.get("id")
         if bid is not None:
             agent["ID"] = bid
-        else:
-            agent.pop("ID", None)
 
-        tag = agent.get("tag") or agent.get("tags") or {}
-        tag = dict(tag) if isinstance(tag, dict) else {}
-        tag.pop("arrow_yaw", None)
-        link_id = info.get("link_id")
+        tag = {}
         confidence = info.get("confidence")
         movement_state = info.get("movement_state")
-        if link_id is not None:
-            tag["link_id"] = link_id
-        else:
-            tag.pop("link_id", None)
-            tag.pop("link_ID", None)
         if confidence is not None:
-            tag["confidence"] = confidence
-        else:
-            tag.pop("confidence", None)
+            tag["confidence"] = str(confidence)
         if movement_state is not None:
-            tag["movement_state"] = movement_state
-        else:
-            tag.pop("movement_state", None)
+            tag["movement_state"] = str(movement_state)
 
         reserved_keys = {
             "x", "y", "z", "l", "w", "h", "yaw", "roll", "pitch",
-            "class_name", "id", "link_id", "confidence", "movement_state", "arrow_yaw",
+            "class_name", "id", "link_id", "confidence", "movement_state",
+            "arrow_yaw", "numPoints",
         }
         for key, value in info.items():
             if key in reserved_keys:
                 continue
             if value is not None:
                 tag[key] = value
-            else:
-                tag.pop(key, None)
-        agent["tag"] = tag
-        agent.pop("tags", None)
+        if tag:
+            agent["tag"] = tag
 
         agents_out.append(agent)
 
