@@ -53,12 +53,13 @@ from features.point_rect_select_mixin import PointRectSelectMixin
 from features.extrinsic_calib_mixin import ExtrinsicCalibMixin
 from features.plane_mixin import PlaneMixin
 from features.mask_mixin import MaskMixin
+from features.segmentation_mixin import SegmentationMixin
 from features.obstacle_cluster import ObstacleCluster
 
 LIST_POINT_SELECT_CAP = 8000  # 列表展示上限，避免一次框选过多点时界面卡死
 
 class PointCloudViewer(
-    QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMixin, MaskMixin, ExtrinsicCalibMixin
+    QMainWindow, PCDViewWidget, PointRectSelectMixin, PlaneMixin, MaskMixin, SegmentationMixin, ExtrinsicCalibMixin
 ):
     def __init__(self):
         QMainWindow.__init__(self)
@@ -190,6 +191,7 @@ class PointCloudViewer(
         if not hasattr(self, "_mask_settings_action"):
             self._mask_settings_action = None
         self._init_mask_draw_state()
+        self._init_segmentation_state()
         self._cluster_bbox_items = []
         self._cluster_bbox_infos = []
         self._selected_cluster_bbox_index = None
@@ -350,6 +352,21 @@ class PointCloudViewer(
         self.mask_edit_btn.clicked.connect(self._toggle_mask_draw_mode)
         self.mask_edit_btn.hide()
 
+        self.segmentation_legend_panel = QFrame(self.glwidget)
+        self.segmentation_legend_panel.setObjectName("SegmentationLegendPanel")
+        self.segmentation_legend_panel.setStyleSheet(
+            "QFrame#SegmentationLegendPanel { background: rgba(17, 24, 39, 210); "
+            "border: 1px solid rgba(255, 255, 255, 70); border-radius: 6px; } "
+            "QLabel { color: black; padding: 8px 10px 8px 10px; }"
+        )
+        legend_layout = QVBoxLayout(self.segmentation_legend_panel)
+        legend_layout.setContentsMargins(0, 0, 0, 0)
+        self.segmentation_legend_label = QLabel(self.segmentation_legend_panel)
+        self.segmentation_legend_label.setWordWrap(True)
+        self.segmentation_legend_label.setTextFormat(Qt.RichText)
+        legend_layout.addWidget(self.segmentation_legend_label)
+        self.segmentation_legend_panel.hide()
+
         self.bbox_attr_panel = BboxAttributePanel(self.glwidget)
         self.bbox_attr_panel.attrSettingsRequested.connect(self._open_annotation_settings)
         self.bbox_attr_panel.hide()
@@ -385,6 +402,8 @@ class PointCloudViewer(
         self.mask_edit_btn.setGeometry(m, m, btn_w, btn_h)
         if self.mask_edit_btn.isVisible():
             self.mask_edit_btn.raise_()
+        if hasattr(self, "_update_segmentation_legend_geometry"):
+            self._update_segmentation_legend_geometry()
 
     def _update_bbox_attr_panel_geometry(self):
         if not hasattr(self, "bbox_attr_panel") or self.glwidget.width() <= 0 or self.glwidget.height() <= 0:
@@ -465,7 +484,7 @@ class PointCloudViewer(
 
         self._mask_edit_action = self.create_action(
             "地图绘制模式",
-            "icons/mask_mask.svg",
+            "icons/map.png",
             self._toggle_mask_edit_mode,
         )
         self._mask_edit_action.setCheckable(True)
@@ -477,6 +496,15 @@ class PointCloudViewer(
         )
         self._mask_toggle_action.setCheckable(True)
         self.toolbar.addAction(self._mask_toggle_action)
+        self._segmentation_action = self.create_action(
+            "点云分割标注",
+            "icons/seg.png",
+            self._toggle_segmentation_mode,
+        )
+        self._segmentation_action.setToolTip("点云分割标注：右键添加顶点，右键点首点闭合，Esc取消，Backspace撤销")
+        self._segmentation_action.setStatusTip("进入3D点云分割标注模式；左键旋转、Ctrl+左键平移和滚轮缩放保持可用")
+        self._segmentation_action.setCheckable(True)
+        self.toolbar.addAction(self._segmentation_action)
         self._cluster_action = self.create_action(
             "点云聚类",
             "icons/cluster.svg",
@@ -543,6 +571,18 @@ class PointCloudViewer(
         self._bbox_attr_settings_action = self.create_action(
             "标注设置", "icons/add_bbox.svg", self._open_annotation_settings
         )
+        self._segmentation_label_settings_action = self.create_action(
+            "分割标签设置", "icons/mask.svg", self._open_segmentation_label_settings
+        )
+        self._segmentation_label_settings_action.setStatusTip("配置分割标签的名称、整数key和显示颜色")
+        self._exit_segmentation_action = self.create_action(
+            "退出分割模式", "icons/cancel_box_selection.svg", self._exit_segmentation_mode
+        )
+        self._exit_segmentation_action.setStatusTip("退出点云分割标注模式并清除未闭合多边形")
+        self._load_segmentation_txt_action = self.create_action(
+            "加载分割TXT", "icons/open.svg", self._load_segmentation_txt_dialog
+        )
+        self._load_segmentation_txt_action.setStatusTip("导入已有分割txt到当前帧，后续修改自动保存为当前PCD同名txt")
         self.save_view_action = self.create_action("Save View", 'icons/save_view.svg', self.save_view)
         self.load_view_action = self.create_action("Load View", 'icons/load_view.svg', self.load_view)
 
@@ -555,6 +595,13 @@ class PointCloudViewer(
         tool_menu.addAction(self._cluster_params_action)
         tool_menu.addAction(self._extrinsic_calib_menu_action)
         tool_menu.addAction(self._bbox_attr_settings_action)
+        self._segmentation_settings_menu = tool_menu.addMenu(
+            QIcon(os.path.join(self.curpath, "icons/seg.png")),
+            "分割设置",
+        )
+        self._segmentation_settings_menu.addAction(self._segmentation_label_settings_action)
+        self._segmentation_settings_menu.addAction(self._load_segmentation_txt_action)
+        self._segmentation_settings_menu.addAction(self._exit_segmentation_action)
         tool_menu.addAction(self.save_view_action)
         tool_menu.addAction(self.load_view_action)
 
@@ -830,6 +877,8 @@ class PointCloudViewer(
             self._hide_history_frames()
         if self._handle_mask_draw_key_event(event):
             return True
+        if self._handle_segmentation_key_event(event):
+            return True
         if self._handle_frame_key_event(event):
             return True
         if obj != self.glwidget:
@@ -839,6 +888,7 @@ class PointCloudViewer(
             self._update_save_button_geometry()
             self._update_bbox_attr_panel_geometry()
             self._update_mask_edit_button_geometry()
+            self._update_segmentation_legend_geometry()
         mask_interaction_mode = bool(getattr(self, "_mask_draw_mode", False)) or bool(getattr(self, "_mask_edit_mode", False))
         if event.type() == QEvent.Wheel and mask_interaction_mode:
             ratio = self.glwidget.devicePixelRatioF()
@@ -869,6 +919,9 @@ class PointCloudViewer(
 
         if mask_interaction_mode:
             return self._handle_mask_draw_mouse_event(event, mx, my)
+
+        if self._handle_segmentation_mouse_event(event, mx, my):
+            return True
 
         if (self.history_shift_down and self.history_display_mode == "browse" and
                 event.type() == QEvent.MouseButtonPress):
@@ -1668,6 +1721,21 @@ class PointCloudViewer(
         dist = self.glwidget.opts.get("distance", 15)
         self.glwidget.setCameraPosition(distance=dist, elevation=90, azimuth=0)
 
+    @staticmethod
+    def _list_point_cloud_files(directory):
+        if not directory or not os.path.isdir(directory):
+            return []
+        names = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+        pcd_stems = {Path(f).stem for f in names if f.lower().endswith(".pcd")}
+        files = []
+        for name in names:
+            lower = name.lower()
+            if lower.endswith(".pcd"):
+                files.append(name)
+            elif lower.endswith(".txt") and Path(name).stem not in pcd_stems:
+                files.append(name)
+        return natsorted(files)
+
     def open_directory(self):
         self.timer.stop()  # Stop the timer to avoid auto-frame transition
         self.playing = False
@@ -1676,9 +1744,7 @@ class PointCloudViewer(
         self.directory = QFileDialog.getExistingDirectory(None, "Select Point Cloud Directory")
         if self.directory:
             self._clear_session_extrinsic_offsets()
-            self.point_cloud_files = natsorted([
-                f for f in os.listdir(self.directory) if f.endswith('.txt') or f.endswith('.pcd')
-            ])
+            self.point_cloud_files = self._list_point_cloud_files(self.directory)
             if not self.point_cloud_files:
                 self.current_frame_index = -1
                 self.frame_slider.blockSignals(True)
@@ -1935,6 +2001,7 @@ class PointCloudViewer(
             self.raw_points, self.structured_points, metadata = get_points_from_pcd_file(self.pcd_file)
             self.metadata = metadata
             self._points_rect_select_mask = None
+            self._sync_segmentation_for_loaded_frame()
             if self._point_select_dock is not None:
                 self._reset_point_select_table_ui()
             self._extrinsic_after_load_frame()
@@ -1973,6 +2040,7 @@ class PointCloudViewer(
         self.pcd_file = os.path.join(self.directory, self.point_cloud_files[self.current_frame_index])
         self.raw_points, self.structured_points, metadata = get_points_from_pcd_file(self.pcd_file)
         self._points_rect_select_mask = None
+        self._sync_segmentation_for_loaded_frame()
         if self._point_select_dock is not None:
             self._reset_point_select_table_ui()
         metadata_changed = metadata != self.metadata
@@ -2422,6 +2490,7 @@ class PointCloudViewer(
                 self.colors = self.Colors[0](self.min_max_normalization(self.points[:, 0]))
                     
         rgba = self._colors_to_rgba_n4(self.colors, len(self.points))
+        rgba = self._apply_segmentation_colors(rgba, keep_inside_mask)
         m = getattr(self, "_points_rect_select_mask", None)
         if m is not None:
             # 若开启“仅保留圈内点”，self.points 会被 keep_inside_mask 过滤，
