@@ -668,6 +668,8 @@ class SegmentationMixinTest(unittest.TestCase):
             self.assertTrue(viewer._segmentation_mode)
             self.assertTrue(viewer.segmentation_legend_panel.isVisible())
             self.assertIn("右键", viewer._segmentation_action.toolTip())
+            segmentation_button = viewer.toolbar.widgetForAction(viewer._segmentation_action)
+            self.assertIn("#2196F3", segmentation_button.styleSheet())
             segmentation_menu_action = next(action for action in tool_actions if action.text() == "分割设置")
             segmentation_actions = segmentation_menu_action.menu().actions()
             self.assertFalse(any(action.text() == "分割标签设置" for action in tool_actions))
@@ -681,6 +683,7 @@ class SegmentationMixinTest(unittest.TestCase):
             self._app.processEvents()
             self.assertFalse(viewer._segmentation_mode)
             self.assertFalse(viewer.segmentation_legend_panel.isVisible())
+            self.assertNotIn("#2196F3", segmentation_button.styleSheet())
         finally:
             viewer.close()
 

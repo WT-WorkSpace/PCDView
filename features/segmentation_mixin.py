@@ -90,13 +90,19 @@ class SegmentationMixin:
         if hasattr(self, "vis_fram"):
             self.vis_fram(updata_color_bar=False, preserve_current_bboxes=True)
 
+    def _set_segmentation_action_active(self, active):
+        action = getattr(self, "_segmentation_action", None)
+        if action is not None:
+            action.setChecked(bool(active))
+        if hasattr(self, "_set_toolbar_action_active"):
+            self._set_toolbar_action_active(action, bool(active))
+
     def _toggle_segmentation_mode(self):
         if bool(getattr(self, "_segmentation_mode", False)):
             self._exit_segmentation_mode()
             return
         self._segmentation_mode = True
-        if hasattr(self, "_segmentation_action") and self._segmentation_action is not None:
-            self._segmentation_action.setChecked(True)
+        self._set_segmentation_action_active(True)
         self._prepare_segmentation_mode_entry()
         self._load_segmentation_for_current_frame()
         self._segmentation_display_enabled = True
@@ -106,8 +112,7 @@ class SegmentationMixin:
 
     def _exit_segmentation_mode(self):
         self._segmentation_mode = False
-        if hasattr(self, "_segmentation_action") and self._segmentation_action is not None:
-            self._segmentation_action.setChecked(False)
+        self._set_segmentation_action_active(False)
         self._clear_segmentation_polygon()
         self._segmentation_display_enabled = False
         self._set_segmentation_legend_visible(False)

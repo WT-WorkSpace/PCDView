@@ -37,6 +37,8 @@ python -m PyInstaller --onefile --windowed \
   --add-data "icons/cluster.svg:icons" \
   --add-data "icons/load_view.svg:icons" \
   --add-data "icons/save_view.svg:icons" \
+  --add-data "icons/seg.png:icons" \
+  --add-data "icons/map.png:icons" \
   --add-data "icons/open_boxes_dir.svg:icons" \
   --add-data "icons/wangge.svg:icons" \
   --add-data "icons/add_bbox.svg:icons" \
