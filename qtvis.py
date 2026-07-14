@@ -37,6 +37,7 @@ from utils.bbox_pick import (
 from widget.opengl_widget import PCDViewWidget
 from widget.bbox_three_views import BboxThreeViewsPanel
 from widget.bbox_attr_panel import BboxAttributePanel
+from widget.slam_settings_panel import SlamSettingsPanel
 from utils.utils import pil2qicon
 from utils.load_pcd import get_points_from_pcd_file
 from utils.load_bboxes_json import get_anno_from_tanway_json, save_bboxes_to_tanway_json
@@ -55,6 +56,7 @@ from features.plane_mixin import PlaneMixin
 from features.mask_mixin import MaskMixin
 from features.segmentation_mixin import SegmentationMixin
 from features.obstacle_cluster import ObstacleCluster
+from utils.slam import load_pose_file, transform_xyz
 
 LIST_POINT_SELECT_CAP = 8000  # 列表展示上限，避免一次框选过多点时界面卡死
 
@@ -147,6 +149,16 @@ class PointCloudViewer(
         self.history_display_mode = "overlay"
         self.history_browse_index = 0
         self.history_main_scatter_hidden = False
+
+        # SLAM 实时建图：位姿按 point_cloud_files 的自然排序逐帧对应。
+        self.slam_mode = False
+        self.slam_pose_path = ""
+        self.slam_poses = []
+        self.slam_history_frames = 10
+        self.slam_history_transparent = True
+        self.slam_points_cache = {}
+        self.slam_scatter = None
+        self.slam_path_item = None
 
         self.points_rect_select_mode = False  # 点云框选：拖拽矩形，选中点标红并列表展示
         self._points_rect_select_mask = None  # 与当前点云等长的 bool 掩码，或 None
@@ -371,6 +383,13 @@ class PointCloudViewer(
         self.bbox_attr_panel.attrSettingsRequested.connect(self._open_annotation_settings)
         self.bbox_attr_panel.hide()
 
+        self.slam_settings_panel = SlamSettingsPanel(self.glwidget)
+        self.slam_settings_panel.applyRequested.connect(self._apply_slam_settings)
+        self.slam_settings_panel.panelGeometryChanged.connect(
+            self._update_slam_settings_panel_geometry
+        )
+        self.slam_settings_panel.hide()
+
     def _update_save_button_geometry(self):
         """将主视图右上角标注操作按钮定位。"""
         if self.glwidget.width() <= 0 or self.glwidget.height() <= 0:
@@ -418,6 +437,20 @@ class PointCloudViewer(
         self.bbox_attr_panel.setGeometry(x, y, panel_w, panel_h)
         self.bbox_attr_panel.raise_()
 
+    def _update_slam_settings_panel_geometry(self):
+        if not hasattr(self, "slam_settings_panel") or self.glwidget.width() <= 0:
+            return
+        margin = 12
+        original_width = min(460, max(340, int(self.glwidget.width() * 0.28)))
+        panel_width = max(250, int(round(original_width / 1.6)))
+        self.slam_settings_panel.setFixedWidth(panel_width)
+        panel_height = self.slam_settings_panel.sizeHint().height()
+        panel_height = min(panel_height, max(160, self.glwidget.height() - margin * 2))
+        panel_y = max(margin, self.glwidget.height() - panel_height - margin)
+        self.slam_settings_panel.setGeometry(margin, panel_y, panel_width, panel_height)
+        if self.slam_settings_panel.isVisible():
+            self.slam_settings_panel.raise_()
+
     def _show_bbox_attr_panel(self, bbox_index, info):
         if not hasattr(self, "bbox_attr_panel"):
             return
@@ -446,6 +479,14 @@ class PointCloudViewer(
         self.toolbar.addAction(self.open_dir_action)
         self.toolbar.addAction(self.open_bboxes_dir_action)
         self.toolbar.addAction(self.open_history_frames_action)
+        self.toolbar.addSeparator()
+
+        self._slam_action = self.create_action(
+            "SLAM 建图", "icons/map.png", self._toggle_slam_mode
+        )
+        self._slam_action.setCheckable(True)
+        self._slam_action.setToolTip("进入/退出 SLAM 模式：加载位姿并叠加连续点云")
+        self.toolbar.addAction(self._slam_action)
         self.toolbar.addSeparator()
 
         self.toolbar.addAction(self.increase_pointsize_action)
@@ -889,6 +930,7 @@ class PointCloudViewer(
             self._update_bbox_attr_panel_geometry()
             self._update_mask_edit_button_geometry()
             self._update_segmentation_legend_geometry()
+            self._update_slam_settings_panel_geometry()
         mask_interaction_mode = bool(getattr(self, "_mask_draw_mode", False)) or bool(getattr(self, "_mask_edit_mode", False))
         if event.type() == QEvent.Wheel and mask_interaction_mode:
             ratio = self.glwidget.devicePixelRatioF()
@@ -1716,6 +1758,275 @@ class PointCloudViewer(
                 "border-radius: 6px; padding: 6px 10px; }"
             )
 
+    def _remove_gl_item_if_present(self, item):
+        if item is None:
+            return
+        try:
+            items = getattr(self.glwidget, "items", None)
+            if items is None or item in items:
+                self.glwidget.removeItem(item)
+        except ValueError:
+            pass
+
+    def _clear_slam_scatter(self):
+        self._remove_gl_item_if_present(getattr(self, "slam_scatter", None))
+        self.slam_scatter = None
+
+    def _clear_slam_path(self):
+        self._remove_gl_item_if_present(getattr(self, "slam_path_item", None))
+        self.slam_path_item = None
+
+    def _draw_slam_path(self):
+        """Connect transformed sensor origins from the first pose to the current frame."""
+        self._clear_slam_path()
+        pose_count = min(self.current_frame_index + 1, len(self.slam_poses))
+        if pose_count < 2:
+            return pose_count
+        origins = np.asarray(
+            [pose[:3, 3] for pose in self.slam_poses[:pose_count]],
+            dtype=np.float32,
+        )
+        self.slam_path_item = gl.GLLinePlotItem(
+            pos=origins,
+            color=(1.0, 0.42, 0.05, 1.0),
+            width=3.0,
+            antialias=True,
+            mode="line_strip",
+        )
+        self.slam_path_item.setGLOptions("additive")
+        self.glwidget.addItem(self.slam_path_item)
+        return pose_count
+
+    def _disable_slam_mode(self, restore_frame=True):
+        was_enabled = bool(getattr(self, "slam_mode", False))
+        self.slam_mode = False
+        self._clear_slam_scatter()
+        self._clear_slam_path()
+        self.slam_points_cache = {}
+        if hasattr(self, "slam_settings_panel"):
+            self.slam_settings_panel.hide()
+            self.slam_settings_panel.set_running(False)
+        if hasattr(self, "_slam_action"):
+            self._slam_action.blockSignals(True)
+            self._slam_action.setChecked(False)
+            self._slam_action.blockSignals(False)
+            self._set_toolbar_action_active(self._slam_action, False)
+        if restore_frame and was_enabled and hasattr(self, "raw_points"):
+            self.vis_fram()
+
+    def _remove_pose_txt_from_frames(self, pose_path):
+        """A pose txt in the PCD directory must not be treated as a point-cloud frame."""
+        if not self.directory or os.path.dirname(os.path.abspath(pose_path)) != os.path.abspath(self.directory):
+            return
+        pose_name = os.path.basename(pose_path)
+        if pose_name not in self.point_cloud_files:
+            return
+        current_name = None
+        if 0 <= self.current_frame_index < len(self.point_cloud_files):
+            current_name = self.point_cloud_files[self.current_frame_index]
+        self.point_cloud_files = [name for name in self.point_cloud_files if name != pose_name]
+        if not self.point_cloud_files:
+            self.current_frame_index = -1
+        elif current_name in self.point_cloud_files:
+            self.current_frame_index = self.point_cloud_files.index(current_name)
+        else:
+            self.current_frame_index = min(max(self.current_frame_index, 0), len(self.point_cloud_files) - 1)
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setMaximum(max(0, len(self.point_cloud_files) - 1))
+        self.frame_slider.setValue(max(0, self.current_frame_index))
+        self.frame_slider.blockSignals(False)
+
+    def _toggle_slam_mode(self, checked=False):
+        if not checked:
+            self._disable_slam_mode(restore_frame=True)
+            self._set_status_message("已退出 SLAM 模式")
+            return
+        if not getattr(self, "directory", None) or not self.point_cloud_files:
+            QMessageBox.warning(self, "无法进入 SLAM", "请先打开包含连续点云的目录。")
+            self._disable_slam_mode(restore_frame=False)
+            return
+        self._set_toolbar_action_active(self._slam_action, True)
+        self.slam_settings_panel.set_settings(
+            getattr(self, "slam_pose_path", ""),
+            getattr(self, "slam_history_frames", 10),
+            getattr(self, "slam_history_transparent", True),
+            self.directory,
+        )
+        self.slam_settings_panel.set_running(bool(getattr(self, "slam_mode", False)))
+        self._update_slam_settings_panel_geometry()
+        self.slam_settings_panel.show()
+        self.slam_settings_panel.raise_()
+        self._set_status_message("SLAM 设置已打开，请加载位姿并开始建图")
+
+    def _set_slam_panel_message(self, message, error=True):
+        if not hasattr(self, "slam_settings_panel"):
+            return
+        self.slam_settings_panel.set_message(message, error=error)
+        self._update_slam_settings_panel_geometry()
+
+    def _apply_slam_settings(self):
+        if not getattr(self, "directory", None) or not self.point_cloud_files:
+            self._set_slam_panel_message("请先打开包含连续点云的目录。")
+            return
+        pose_path = self.slam_settings_panel.pose_path()
+        if not pose_path or not os.path.isfile(pose_path):
+            self._set_slam_panel_message("请选择一个存在的 TXT 位姿文件。")
+            return
+        try:
+            poses = load_pose_file(pose_path)
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._set_slam_panel_message("位姿加载失败：{}".format(exc))
+            return
+        self._remove_pose_txt_from_frames(pose_path)
+        if not self.point_cloud_files:
+            self._set_slam_panel_message("目录中没有可用的点云帧。")
+            return
+
+        self.slam_pose_path = pose_path
+        self.slam_poses = poses
+        self.slam_history_frames = self.slam_settings_panel.history_frames()
+        self.slam_history_transparent = self.slam_settings_panel.history_transparent()
+        self.slam_points_cache = {}
+        self.slam_mode = True
+        self._slam_action.setChecked(True)
+        self._set_toolbar_action_active(self._slam_action, True)
+        self._refresh_slam_map()
+        self.slam_settings_panel.set_running(True)
+        if len(poses) < len(self.point_cloud_files):
+            self._set_slam_panel_message(
+                "已开始，但位姿仅 {} 帧；后续 {} 帧无法建图。".format(
+                    len(poses), len(self.point_cloud_files) - len(poses)
+                ),
+                error=True,
+            )
+        else:
+            self._set_slam_panel_message(
+                "设置已应用：{} 个位姿。".format(len(poses)),
+                error=False,
+            )
+
+    def _slam_data_for_frame(self, frame_index):
+        if frame_index == self.current_frame_index:
+            return np.asarray(self.raw_points)[:, :3], getattr(self, "structured_points", None)
+        if frame_index in self.slam_points_cache:
+            cached = self.slam_points_cache[frame_index]
+            # 兼容修改前会话中仅缓存 xyz 数组的情况。
+            if isinstance(cached, tuple):
+                return cached
+            return cached, None
+        path = os.path.join(self.directory, self.point_cloud_files[frame_index])
+        points, structured, _ = get_points_from_pcd_file(path)
+        data = (np.asarray(points)[:, :3], structured)
+        self.slam_points_cache[frame_index] = data
+        return data
+
+    def _slam_field_values(self, field_name, world_points, structured):
+        """Return values used by the right-side x/y/z/i color controls."""
+        xyz_index = {"x": 0, "y": 1, "z": 2}.get(str(field_name).lower())
+        if xyz_index is not None:
+            # SLAM 模式下坐标已经位于世界系，按世界坐标显色更符合地图观察习惯。
+            return world_points[:, xyz_index]
+        names = getattr(getattr(structured, "dtype", None), "names", None)
+        if names and field_name in names:
+            return np.asarray(structured[field_name]).reshape(-1)
+        return None
+
+    def _slam_colors_from_values(self, values):
+        values = np.asarray(values)
+        if values.size == 0:
+            return np.empty((0, 4), dtype=np.float32)
+        finite = np.isfinite(values)
+        normalized = np.zeros(values.shape, dtype=np.float64)
+        if np.any(finite):
+            minimum = float(np.min(values[finite]))
+            maximum = float(np.max(values[finite]))
+            if maximum > minimum:
+                normalized[finite] = (values[finite] - minimum) / (maximum - minimum)
+        rgba = np.asarray(self.Colors[0](normalized), dtype=np.float32)
+        rgba[~finite] = (0.5, 0.5, 0.5, 1.0)
+        return rgba
+
+    def _refresh_slam_map(self):
+        if not getattr(self, "slam_mode", False):
+            return
+        self._clear_slam_scatter()
+        self._clear_slam_path()
+        if not (0 <= self.current_frame_index < len(self.point_cloud_files)):
+            return
+        if self.current_frame_index >= len(self.slam_poses):
+            self._remove_gl_item_if_present(getattr(self, "scatter", None))
+            self._set_status_message("当前第 {} 帧没有对应位姿，SLAM 建图已暂停".format(self.current_frame_index + 1))
+            return
+
+        first_index = max(0, self.current_frame_index - self.slam_history_frames)
+        indices = list(range(first_index, self.current_frame_index + 1))
+        indices = [index for index in indices if index < len(self.slam_poses)]
+        positions = []
+        field_values = []
+        frame_alphas = []
+        selected_field = getattr(self, "color_fields", None)
+        try:
+            for index in indices:
+                local_points, structured = self._slam_data_for_frame(index)
+                world_points = transform_xyz(local_points, self.slam_poses[index]).astype(np.float32, copy=False)
+                positions.append(world_points)
+                if index == self.current_frame_index:
+                    alpha = 1.0
+                elif not getattr(self, "slam_history_transparent", True):
+                    alpha = 1.0
+                else:
+                    age = self.current_frame_index - index
+                    alpha = max(0.16, 0.58 - 0.035 * age)
+                frame_alphas.append(np.full(len(world_points), alpha, dtype=np.float32))
+                if selected_field is not None:
+                    values = self._slam_field_values(selected_field, world_points, structured)
+                    if values is None or len(values) != len(world_points):
+                        raise ValueError("点云字段 {} 不存在或长度不匹配".format(selected_field))
+                    field_values.append(values)
+        except Exception as exc:
+            self._set_status_message("SLAM 点云加载失败：{}".format(exc))
+            return
+
+        if not positions:
+            return
+        keep_cache = set(indices)
+        self.slam_points_cache = {
+            index: points for index, points in self.slam_points_cache.items() if index in keep_cache
+        }
+        map_points = np.concatenate(positions, axis=0)
+        map_alphas = np.concatenate(frame_alphas, axis=0)
+        if selected_field is not None:
+            # 所有叠加帧使用同一个取值范围，避免每帧单独归一化造成颜色跳变。
+            map_colors = self._slam_colors_from_values(np.concatenate(field_values, axis=0))
+        else:
+            solid = np.asarray(
+                getattr(self, "_user_solid_rgbf", (0.05, 0.48, 1.0, 1.0)),
+                dtype=np.float32,
+            ).reshape(-1)
+            if len(solid) < 3:
+                solid = np.asarray((0.05, 0.48, 1.0, 1.0), dtype=np.float32)
+            map_colors = np.tile(
+                np.asarray((solid[0], solid[1], solid[2], 1.0), dtype=np.float32),
+                (len(map_points), 1),
+            )
+        map_colors[:, 3] *= map_alphas
+        self._remove_gl_item_if_present(getattr(self, "scatter", None))
+        self.slam_scatter = GLScatterPlotItem(
+            pos=map_points,
+            color=map_colors,
+            size=self.point_size,
+        )
+        self.glwidget.addItem(self.slam_scatter)
+        path_pose_count = self._draw_slam_path()
+        self._set_status_message(
+            "SLAM 建图：当前帧 {}，叠加 {} 帧，共 {:,} 个点，轨迹 {} 个位姿".format(
+                self.current_frame_index + 1,
+                max(0, len(indices) - 1),
+                len(map_points),
+                path_pose_count,
+            )
+        )
+
     def _set_topdown_view(self):
         """设置相机为俯视图"""
         dist = self.glwidget.opts.get("distance", 15)
@@ -1740,6 +2051,7 @@ class PointCloudViewer(
         self.timer.stop()  # Stop the timer to avoid auto-frame transition
         self.playing = False
         self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
+        self._disable_slam_mode(restore_frame=False)
 
         self.directory = QFileDialog.getExistingDirectory(None, "Select Point Cloud Directory")
         if self.directory:
@@ -1990,6 +2302,7 @@ class PointCloudViewer(
         self.timer.stop()
         self.playing = False
         self.play_button.setIcon(QIcon(os.path.join(self.curpath, 'icons/play_pcd.png')))
+        self._disable_slam_mode(restore_frame=False)
         self.pcd_file, _ = QFileDialog.getOpenFileName(None, "Open File", "", "Pcd Files (*.pcd)", options=QFileDialog.Options())
         self.colors = QColor(0, 0, 255).getRgbF()
         self._user_solid_rgbf = self.colors
@@ -2523,6 +2836,7 @@ class PointCloudViewer(
         self.scatter = GLScatterPlotItem(pos=self.points, color=rgba, size=self.point_size)
         self.colors = rgba
         self.glwidget.addItem(self.scatter)
+        self._refresh_slam_map()
         if updata_color_bar:
             self.update_color_sidebar()
         self._refresh_cluster_if_enabled()
