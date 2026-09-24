@@ -34,6 +34,8 @@ a = Analysis(
         ('icons/combo_down.svg', 'icons'),
         ('icons/history.svg', 'icons'),
         ('icons/calibration.svg', 'icons'),
+        ('icons/seg.png', 'icons'),
+        ('icons/map.png', 'icons'),
     ],
     hiddenimports=[
         'PyQt5.QtWidgets',
